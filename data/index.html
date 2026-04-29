@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Druida BOT</title>
+  <link rel="stylesheet" href="/style.css?v=5">
+</head>
+
+<body>
+
+  <div class="app">
+
+    <!-- TOPBAR -->
+    <header class="topbar">
+      <div class="topbar-left">
+        <button class="topbar-logo" type="button" onclick="showPreloadedHome()">DRUIDA <span>BOT</span></button>
+        <div class="topbar-sub" id="fechaHora">--/--/---- --:--:--</div>
+      </div>
+      <div class="topbar-right">
+        <button class="panel-btn" type="button" onclick="showPreloadedPanel()" title="Panel de usuario">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>
+        </button>
+        <div class="online-badge" id="onlineBadge">
+          <span class="online-dot"></span>
+          <span id="onlineLabel">En línea</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- TABS -->
+    <nav class="tabs">
+      <button class="tab active" type="button" data-tab="homeView"    onclick="showPreloadedHome()">Dashboard</button>
+      <button class="tab"        type="button" data-tab="devicesView" onclick="showPreloadedDevices()">Dispositivos</button>
+      <button class="tab"        type="button" data-tab="paramsView"  onclick="showPreloadedParams()">Parámetros</button>
+    </nav>
+
+    <main id="appContent" class="view">
+
+      <!-- ══════════ DASHBOARD ══════════ -->
+      <section id="homeView" class="preloaded-view page">
+
+        <div class="card dash-sensor">
+          <div class="metrics-strip">
+
+            <div class="mc mc--temp">
+              <div class="mc-label">🌡️ Temperatura</div>
+              <div class="mc-value"><span id="temp">--</span><span class="mc-unit">°C</span></div>
+              <div class="mc-range">
+                <div class="mc-ext mc-ext--cold">
+                  <span class="mc-ext-icon">▼</span>
+                  <span class="mc-ext-val" id="tempMin">--</span>
+                  <span class="mc-ext-time" id="tempMinHora">--:--</span>
+                </div>
+                <div class="mc-ext mc-ext--hot">
+                  <span class="mc-ext-icon">▲</span>
+                  <span class="mc-ext-val" id="tempMax">--</span>
+                  <span class="mc-ext-time" id="tempMaxHora">--:--</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="mc-vsep"></div>
+
+            <div class="mc mc--hum">
+              <div class="mc-label">💧 Humedad</div>
+              <div class="mc-value"><span id="hum">--</span><span class="mc-unit">%</span></div>
+              <div class="mc-range">
+                <div class="mc-ext mc-ext--dry">
+                  <span class="mc-ext-icon">▼</span>
+                  <span class="mc-ext-val" id="humMin">--</span>
+                  <span class="mc-ext-time" id="humMinHora">--:--</span>
+                </div>
+                <div class="mc-ext mc-ext--wet">
+                  <span class="mc-ext-icon">▲</span>
+                  <span class="mc-ext-val" id="humMax">--</span>
+                  <span class="mc-ext-time" id="humMaxHora">--:--</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="mc-vsep"></div>
+
+            <div class="mc mc--vpd">
+              <div class="mc-label">📊 VPD</div>
+              <div class="mc-value mc-value--sm"><span id="dpv">--</span><span class="mc-unit">kPa</span></div>
+              <div class="vpd-badge" id="vpdBadge"></div>
+              <div class="cycle-row cycle-row--inline">
+                <span class="pill blue"   id="diaVege">V: --</span>
+                <span class="pill purple" id="diaFlora">F: --</span>
+                <span class="pill amber hidden" id="diaSuper">S: --</span>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+        <div class="card chart-card">
+          <div class="chart-header">
+            <div class="chart-title">24 h</div>
+            <div class="chart-legend">
+              <span><i class="dot-temp"></i>T</span>
+              <span><i class="dot-hum"></i>HR</span>
+            </div>
+          </div>
+          <div class="chart-canvas-wrap">
+            <canvas id="historyChart"></canvas>
+          </div>
+          <div class="chart-empty hidden" id="chartEmpty">Acumulando datos…</div>
+        </div>
+
+        <div class="relay-section">
+          <div class="section-label">Dispositivos</div>
+          <div class="relay-btn-grid" id="dashRelays"></div>
+        </div>
+
+      </section>
+
+      <!-- ══════════ DISPOSITIVOS ══════════ -->
+      <section id="devicesView" class="preloaded-view preloaded-hidden page">
+        <div class="section-label">Modo por dispositivo</div>
+        <div id="devicesList" class="relays-grid"></div>
+        <button type="button" class="btn-save" onclick="saveAllRelays()">Guardar dispositivos</button>
+      </section>
+
+      <!-- ══════════ PARÁMETROS ══════════ -->
+      <section id="paramsView" class="preloaded-view preloaded-hidden page">
+
+        <div class="card">
+          <div class="card-title-row"><span>🌡️</span><div class="card-title">Temperatura</div></div>
+          <div class="param-block">
+            <div class="setpoint-row">
+              <span class="setpoint-label">◎ Objetivo estable</span>
+              <div class="setpoint-input-wrap">
+                <input type="number" id="sp-temp" class="setpoint-input" value="24" min="5" max="45" step="0.5">
+                <span class="setpoint-unit">°C</span>
+              </div>
+              <button class="setpoint-btn" type="button" onclick="applySetpoint('temp')">Aplicar</button>
+            </div>
+            <div class="quad-labels">
+              <div class="ql"><span class="ql-tag heater-on-tag">▼ Calef. ON</span><b class="ql-val" id="qv-temp-1">--</b></div>
+              <div class="ql ql--right"><span class="ql-tag heater-off-tag">Calef. OFF</span><b class="ql-val" id="qv-temp-2">--</b></div>
+              <div class="ql"><span class="ql-tag ac-off-tag">A/C OFF</span><b class="ql-val" id="qv-temp-3">--</b></div>
+              <div class="ql ql--right"><span class="ql-tag ac-on-tag">▲ A/C ON</span><b class="ql-val" id="qv-temp-4">--</b></div>
+            </div>
+            <div class="quad-range-wrap">
+              <div class="quad-track">
+                <div class="quad-fill quad-fill--cold" id="qf-temp-cold"></div>
+                <div class="quad-fill quad-fill--hot"  id="qf-temp-hot"></div>
+              </div>
+              <input class="quad-input qi--1" type="range" id="qr-temp-1" min="5" max="45" step="0.5" value="18" oninput="onQuadRange('temp',1)">
+              <input class="quad-input qi--2" type="range" id="qr-temp-2" min="5" max="45" step="0.5" value="22" oninput="onQuadRange('temp',2)">
+              <input class="quad-input qi--3" type="range" id="qr-temp-3" min="5" max="45" step="0.5" value="25" oninput="onQuadRange('temp',3)">
+              <input class="quad-input qi--4" type="range" id="qr-temp-4" min="5" max="45" step="0.5" value="28" oninput="onQuadRange('temp',4)">
+            </div>
+            <div class="dual-hints"><span>5 °C</span><span>45 °C</span></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title-row"><span>💧</span><div class="card-title">Humedad relativa</div></div>
+          <div class="param-block">
+            <div class="setpoint-row">
+              <span class="setpoint-label">◎ Objetivo estable</span>
+              <div class="setpoint-input-wrap">
+                <input type="number" id="sp-hum" class="setpoint-input" value="60" min="20" max="98" step="1">
+                <span class="setpoint-unit">%</span>
+              </div>
+              <button class="setpoint-btn" type="button" onclick="applySetpoint('hum')">Aplicar</button>
+            </div>
+            <div class="quad-labels">
+              <div class="ql"><span class="ql-tag humid-on-tag">▼ Humidif. ON</span><b class="ql-val" id="qv-hum-1">--</b></div>
+              <div class="ql ql--right"><span class="ql-tag humid-off-tag">Humidif. OFF</span><b class="ql-val" id="qv-hum-2">--</b></div>
+              <div class="ql"><span class="ql-tag dehum-off-tag">Deshumid. OFF</span><b class="ql-val" id="qv-hum-3">--</b></div>
+              <div class="ql ql--right"><span class="ql-tag dehum-on-tag">▲ Deshumid. ON</span><b class="ql-val" id="qv-hum-4">--</b></div>
+            </div>
+            <div class="quad-range-wrap">
+              <div class="quad-track">
+                <div class="quad-fill quad-fill--cold" id="qf-hum-cold"></div>
+                <div class="quad-fill quad-fill--hot"  id="qf-hum-hot"></div>
+              </div>
+              <input class="quad-input qi--1" type="range" id="qr-hum-1" min="20" max="98" step="1" value="40" oninput="onQuadRange('hum',1)">
+              <input class="quad-input qi--2" type="range" id="qr-hum-2" min="20" max="98" step="1" value="55" oninput="onQuadRange('hum',2)">
+              <input class="quad-input qi--3" type="range" id="qr-hum-3" min="20" max="98" step="1" value="65" oninput="onQuadRange('hum',3)">
+              <input class="quad-input qi--4" type="range" id="qr-hum-4" min="20" max="98" step="1" value="75" oninput="onQuadRange('hum',4)">
+            </div>
+            <div class="dual-hints"><span>20 %</span><span>98 %</span></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title-row"><span>🔌</span><div class="card-title">Qué hace cada dispositivo</div></div>
+          <div class="param-card-inner">
+            <label class="cfg-label" for="a-acRelay">Aire acondicionado / extractor (T máx)</label>
+            <select id="a-acRelay" class="cfg-select" onchange="onAssignChange('acRelay', this.value)"></select>
+
+            <label class="cfg-label" for="a-heaterRelay">Calefactor (T mín)</label>
+            <select id="a-heaterRelay" class="cfg-select" onchange="onAssignChange('heaterRelay', this.value)"></select>
+
+            <label class="cfg-label" for="a-humidRelay">Humidificador (HR mín)</label>
+            <select id="a-humidRelay" class="cfg-select" onchange="onAssignChange('humidRelay', this.value)"></select>
+
+            <label class="cfg-label" for="a-dehumidRelay">Deshumidificador (HR máx)</label>
+            <select id="a-dehumidRelay" class="cfg-select" onchange="onAssignChange('dehumidRelay', this.value)"></select>
+          </div>
+        </div>
+
+        <button type="button" class="btn-save" onclick="saveParams()">Guardar parámetros</button>
+      </section>
+
+      <!-- ══════════ PANEL DE USUARIO ══════════ -->
+      <section id="panelView" class="preloaded-view preloaded-hidden page">
+        <div class="panel-back-row">
+          <button class="back-btn" type="button" onclick="showPreloadedHome()">← Volver</button>
+        </div>
+
+        <div class="card info-card">
+          <div class="info-logo">DRUIDA <span>BOT</span></div>
+          <div class="info-grid">
+            <div class="info-item"><span class="info-lbl">Versión</span><span class="info-val" id="pVersion">--</span></div>
+            <div class="info-item"><span class="info-lbl">Plan</span><span class="info-val" id="pPlan">--</span></div>
+            <div class="info-item"><span class="info-lbl">Uptime</span><span class="info-val" id="pUptime">--</span></div>
+            <div class="info-item"><span class="info-lbl">Dispositivos</span><span class="info-val">8</span></div>
+            <div class="info-item"><span class="info-lbl">Sensores</span><span class="info-val">6</span></div>
+          </div>
+        </div>
+
+        <div class="card panel-menu">
+          <button class="menu-row" type="button" onclick="showPreloadedSensors()">
+            <span class="menu-icon">🌡️</span>
+            <div class="menu-text">
+              <div class="menu-title">Sensores</div>
+              <div class="menu-sub">4 ambiente · 2 suelo</div>
+            </div>
+            <span class="menu-arrow">›</span>
+          </button>
+
+          <div class="menu-divider"></div>
+
+          <button class="menu-row" type="button" onclick="showPreloadedWifi()">
+            <span class="menu-icon">📶</span>
+            <div class="menu-text">
+              <div class="menu-title">WiFi</div>
+              <div class="menu-sub" id="pWifiSsid">--</div>
+            </div>
+            <span class="menu-arrow">›</span>
+          </button>
+
+          <div class="menu-divider"></div>
+
+          <button class="menu-row" type="button" onclick="showPreloadedAlerts()">
+            <span class="menu-icon">🔔</span>
+            <div class="menu-text">
+              <div class="menu-title">Alertas</div>
+              <div class="menu-sub">Umbrales y notificaciones</div>
+            </div>
+            <span class="menu-arrow">›</span>
+          </button>
+
+          <div class="menu-divider"></div>
+
+          <button class="menu-row" type="button" onclick="showPreloadedUpdates()">
+            <span class="menu-icon">⬆️</span>
+            <div class="menu-text">
+              <div class="menu-title">Actualizaciones OTA</div>
+              <div class="menu-sub">Backend · Frontend · General</div>
+            </div>
+            <span class="menu-arrow">›</span>
+          </button>
+        </div>
+      </section>
+
+      <!-- ══════════ SENSORES ══════════ -->
+      <section id="sensorsView" class="preloaded-view preloaded-hidden page">
+        <div class="panel-back-row">
+          <button class="back-btn" type="button" onclick="showPreloadedPanel()">← Panel</button>
+        </div>
+        <div class="section-label">Ambiente</div>
+        <div id="sensorsAmbient" class="sensors-list"></div>
+        <div class="section-label" style="margin-top:4px">Suelo</div>
+        <div id="sensorsSoil" class="sensors-list"></div>
+      </section>
+
+      <!-- ══════════ SENSOR CONFIG ══════════ -->
+      <section id="sensorConfigView" class="preloaded-view preloaded-hidden page">
+        <div class="panel-back-row">
+          <button class="back-btn" type="button" onclick="showPreloadedSensors()">← Sensores</button>
+        </div>
+        <div class="card" id="sensorConfigCard"></div>
+        <button type="button" class="btn-save" onclick="saveSensorConfig()">Guardar sensor</button>
+      </section>
+
+      <!-- ══════════ WIFI ══════════ -->
+      <section id="wifiView" class="preloaded-view preloaded-hidden page">
+        <div class="panel-back-row">
+          <button class="back-btn" type="button" onclick="showPreloadedPanel()">← Panel</button>
+        </div>
+
+        <div class="card">
+          <div class="card-title-row"><span>📶</span><div class="card-title">Configuración WiFi</div></div>
+
+          <label class="cfg-label">Red (SSID)</label>
+          <input type="text" id="wifiSsid" class="cfg-input" placeholder="Nombre de red">
+
+          <button type="button" class="btn-secondary" style="margin-top:8px" onclick="scanWifiPanel()">Buscar redes…</button>
+          <select id="wifiScanSel" class="cfg-select hidden" style="margin-top:8px" onchange="byId('wifiSsid').value=this.value"></select>
+
+          <label class="cfg-label">Contraseña</label>
+          <input type="password" id="wifiPass" class="cfg-input" placeholder="••••••••">
+
+          <button type="button" class="btn-save" style="margin-top:14px" onclick="saveWifi()">Guardar WiFi</button>
+
+          <div class="menu-divider" style="margin:16px 0"></div>
+
+          <button type="button" class="btn-secondary" onclick="syncTimePanel()">🕐 Sincronizar hora con este dispositivo</button>
+          <div id="wifiSyncMsg" style="font-size:12px;color:var(--text-2);text-align:center;margin-top:8px;min-height:16px"></div>
+        </div>
+      </section>
+
+      <!-- ══════════ ALERTAS ══════════ -->
+      <section id="alertsView" class="preloaded-view preloaded-hidden page">
+        <div class="panel-back-row">
+          <button class="back-btn" type="button" onclick="showPreloadedPanel()">← Panel</button>
+        </div>
+
+        <div class="card">
+          <div class="card-title-row"><span>🔔</span><div class="card-title">Alertas</div></div>
+
+          <div class="alert-row">
+            <div>
+              <div class="alert-title">⚠️ Sensor desconectado</div>
+              <div class="alert-sub">Alertar si un sensor pierde señal</div>
+            </div>
+            <button class="toggle-sw" id="alertSensor" type="button" onclick="this.classList.toggle('on')"></button>
+          </div>
+
+          <div class="menu-divider"></div>
+
+          <div class="alert-row">
+            <div>
+              <div class="alert-title">🌡️ Temperatura fuera de rango</div>
+              <div class="alert-sub">Alertar si T sale del rango de Parámetros</div>
+            </div>
+            <button class="toggle-sw on" id="alertTemp" type="button" onclick="this.classList.toggle('on')"></button>
+          </div>
+
+          <div class="menu-divider"></div>
+
+          <div class="alert-row">
+            <div>
+              <div class="alert-title">💧 Humedad fuera de rango</div>
+              <div class="alert-sub">Alertar si HR sale del rango de Parámetros</div>
+            </div>
+            <button class="toggle-sw on" id="alertHum" type="button" onclick="this.classList.toggle('on')"></button>
+          </div>
+
+          <p style="font-size:11px;color:var(--text-3);margin:14px 0 0;line-height:1.5">
+            Notificaciones push y email disponibles en próximas versiones.
+          </p>
+        </div>
+
+        <button type="button" class="btn-save" onclick="saveAlerts()">Guardar alertas</button>
+      </section>
+
+      <!-- ══════════ ACTUALIZACIONES OTA ══════════ -->
+      <section id="updatesView" class="preloaded-view preloaded-hidden page">
+        <div class="panel-back-row">
+          <button class="back-btn" type="button" onclick="showPreloadedPanel()">← Panel</button>
+        </div>
+
+        <div class="card">
+          <div class="card-title-row">
+            <span>⬆️</span>
+            <div class="card-title">Actualizaciones OTA</div>
+          </div>
+
+          <p style="font-size:12px;color:var(--text-2);line-height:1.5;margin-top:8px">
+            Ejecutá actualizaciones remotas del firmware principal o de los archivos visuales de la WebApp.
+            Usar solo con WiFi conectado. No cortes la alimentación durante el proceso.
+          </p>
+
+          <button type="button" class="btn-save" onclick="updateBackend()">
+            Actualizar Backend
+          </button>
+
+          <button type="button" class="btn-secondary" style="margin-top:10px" onclick="updateFrontend()">
+            Actualizar Frontend
+          </button>
+
+          <button type="button" class="btn-secondary" style="margin-top:10px" onclick="updateGeneral()">
+            Actualización General
+          </button>
+
+          <div id="updateMsg" style="font-size:12px;color:var(--text-2);text-align:center;margin-top:12px;min-height:16px"></div>
+        </div>
+      </section>
+
+    </main>
+
+    <footer>
+      <p>druidadata@gmail.com · DataDruida</p>
+    </footer>
+
+  </div>
+
+  <div class="legacy-mirror" aria-hidden="true">
+    <span id="nameR1"></span><span id="modeR1Badge"></span><span id="dotR1"></span>
+    <span id="nameR2"></span><span id="modeR2Badge"></span><span id="dotR2"></span>
+    <span id="nameR3"></span><span id="modeR3Badge"></span><span id="dotR3"></span>
+    <span id="nameR4"></span><span id="modeR4Badge"></span><span id="dotR4"></span>
+    <span id="nameR5"></span><span id="modeR5Badge"></span><span id="dotR5"></span>
+    <span id="nameR6"></span><span id="modeR6Badge"></span><span id="dotR6"></span>
+    <span id="nameR7"></span><span id="modeR7Badge"></span><span id="dotR7"></span>
+    <span id="nameR8"></span><span id="modeR8Badge"></span><span id="dotR8"></span>
+  </div>
+
+  <div id="actionToast" class="action-toast"></div>
+
+  <script src="/app.js?v=5"></script>
+</body>
+</html>
