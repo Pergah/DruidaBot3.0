@@ -130,9 +130,8 @@
           <div class="card-title-row"><span>🌡️</span><div class="card-title">Temperatura</div></div>
           <div class="param-block">
             <div class="setpoint-row">
-              <span class="setpoint-label">◎ Objetivo estable</span>
               <div class="setpoint-input-wrap">
-                <input type="number" id="sp-temp" class="setpoint-input" value="24" min="5" max="45" step="0.5">
+                <input type="number" id="sp-temp" class="setpoint-input" value="24" min="15" max="35" step="0.5">
                 <span class="setpoint-unit">°C</span>
               </div>
               <button class="setpoint-btn" type="button" onclick="applySetpoint('temp')">Aplicar</button>
@@ -146,14 +145,29 @@
             <div class="quad-range-wrap">
               <div class="quad-track">
                 <div class="quad-fill quad-fill--cold" id="qf-temp-cold"></div>
+                <div class="quad-fill quad-fill--comfort" id="qf-temp-comfort"></div>
                 <div class="quad-fill quad-fill--hot"  id="qf-temp-hot"></div>
               </div>
-              <input class="quad-input qi--1" type="range" id="qr-temp-1" min="5" max="45" step="0.5" value="18" oninput="onQuadRange('temp',1)">
-              <input class="quad-input qi--2" type="range" id="qr-temp-2" min="5" max="45" step="0.5" value="22" oninput="onQuadRange('temp',2)">
-              <input class="quad-input qi--3" type="range" id="qr-temp-3" min="5" max="45" step="0.5" value="25" oninput="onQuadRange('temp',3)">
-              <input class="quad-input qi--4" type="range" id="qr-temp-4" min="5" max="45" step="0.5" value="28" oninput="onQuadRange('temp',4)">
+              <input class="quad-input qi--1" type="range" id="qr-temp-1" min="15" max="35" step="0.5" value="18" oninput="onQuadRange('temp',1)">
+              <input class="quad-input qi--2" type="range" id="qr-temp-2" min="15" max="35" step="0.5" value="22" oninput="onQuadRange('temp',2)">
+              <input class="quad-input qi--3" type="range" id="qr-temp-3" min="15" max="35" step="0.5" value="25" oninput="onQuadRange('temp',3)">
+              <input class="quad-input qi--4" type="range" id="qr-temp-4" min="15" max="35" step="0.5" value="28" oninput="onQuadRange('temp',4)">
+              <div class="quad-scale" aria-hidden="true">
+                <span class="quad-thumb quad-thumb--1" id="qt-temp-1"></span>
+                <span class="quad-thumb quad-thumb--2" id="qt-temp-2"></span>
+                <span class="quad-thumb quad-thumb--3" id="qt-temp-3"></span>
+                <span class="quad-thumb quad-thumb--4" id="qt-temp-4"></span>
+                <span class="quad-point-value" id="qp-temp-1">--</span>
+                <span class="quad-point-value" id="qp-temp-2">--</span>
+                <span class="quad-point-value" id="qp-temp-3">--</span>
+                <span class="quad-point-value" id="qp-temp-4">--</span>
+                <span class="quad-setpoint-marker" id="qc-temp">
+                  <span class="quad-setpoint-value" id="qcv-temp">--</span>
+                  <span class="quad-setpoint-line"></span>
+                </span>
+              </div>
             </div>
-            <div class="dual-hints"><span>5 °C</span><span>45 °C</span></div>
+            <div class="dual-hints"><span>15 °C</span><span>35 °C</span></div>
           </div>
         </div>
 
@@ -161,9 +175,8 @@
           <div class="card-title-row"><span>💧</span><div class="card-title">Humedad relativa</div></div>
           <div class="param-block">
             <div class="setpoint-row">
-              <span class="setpoint-label">◎ Objetivo estable</span>
               <div class="setpoint-input-wrap">
-                <input type="number" id="sp-hum" class="setpoint-input" value="60" min="20" max="98" step="1">
+                <input type="number" id="sp-hum" class="setpoint-input" value="60" min="30" max="90" step="1">
                 <span class="setpoint-unit">%</span>
               </div>
               <button class="setpoint-btn" type="button" onclick="applySetpoint('hum')">Aplicar</button>
@@ -177,14 +190,29 @@
             <div class="quad-range-wrap">
               <div class="quad-track">
                 <div class="quad-fill quad-fill--cold" id="qf-hum-cold"></div>
+                <div class="quad-fill quad-fill--comfort" id="qf-hum-comfort"></div>
                 <div class="quad-fill quad-fill--hot"  id="qf-hum-hot"></div>
               </div>
-              <input class="quad-input qi--1" type="range" id="qr-hum-1" min="20" max="98" step="1" value="40" oninput="onQuadRange('hum',1)">
-              <input class="quad-input qi--2" type="range" id="qr-hum-2" min="20" max="98" step="1" value="55" oninput="onQuadRange('hum',2)">
-              <input class="quad-input qi--3" type="range" id="qr-hum-3" min="20" max="98" step="1" value="65" oninput="onQuadRange('hum',3)">
-              <input class="quad-input qi--4" type="range" id="qr-hum-4" min="20" max="98" step="1" value="75" oninput="onQuadRange('hum',4)">
+              <input class="quad-input qi--1" type="range" id="qr-hum-1" min="30" max="90" step="1" value="40" oninput="onQuadRange('hum',1)">
+              <input class="quad-input qi--2" type="range" id="qr-hum-2" min="30" max="90" step="1" value="55" oninput="onQuadRange('hum',2)">
+              <input class="quad-input qi--3" type="range" id="qr-hum-3" min="30" max="90" step="1" value="65" oninput="onQuadRange('hum',3)">
+              <input class="quad-input qi--4" type="range" id="qr-hum-4" min="30" max="90" step="1" value="75" oninput="onQuadRange('hum',4)">
+              <div class="quad-scale" aria-hidden="true">
+                <span class="quad-thumb quad-thumb--1" id="qt-hum-1"></span>
+                <span class="quad-thumb quad-thumb--2" id="qt-hum-2"></span>
+                <span class="quad-thumb quad-thumb--3" id="qt-hum-3"></span>
+                <span class="quad-thumb quad-thumb--4" id="qt-hum-4"></span>
+                <span class="quad-point-value" id="qp-hum-1">--</span>
+                <span class="quad-point-value" id="qp-hum-2">--</span>
+                <span class="quad-point-value" id="qp-hum-3">--</span>
+                <span class="quad-point-value" id="qp-hum-4">--</span>
+                <span class="quad-setpoint-marker" id="qc-hum">
+                  <span class="quad-setpoint-value" id="qcv-hum">--</span>
+                  <span class="quad-setpoint-line"></span>
+                </span>
+              </div>
             </div>
-            <div class="dual-hints"><span>20 %</span><span>98 %</span></div>
+            <div class="dual-hints"><span>30 %</span><span>90 %</span></div>
           </div>
         </div>
 

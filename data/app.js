@@ -108,8 +108,8 @@ const DEFAULT_PARAMS = {
 };
 
 const QUAD_CFG = {
-  temp: { min: 5,  max: 45, step: 0.5, gapOuter: 3,  gapInner: 1,  fmt: v => v.toFixed(1) + ' °C' },
-  hum:  { min: 20, max: 98, step: 1,   gapOuter: 10, gapInner: 5,  fmt: v => Math.round(v) + ' %'  }
+  temp: { min: 15, max: 35, step: 0.5, gapOuter: 3,  gapInner: 1,  fmt: v => v.toFixed(1) + ' °C' },
+  hum:  { min: 30, max: 90, step: 1,   gapOuter: 10, gapInner: 5,  fmt: v => Math.round(v) + ' %'  }
 };
 const QUAD_KEYS = {
   temp: ['tempHeaterOn', 'tempHeaterOff', 'tempAcOff', 'tempAcOn'],
@@ -159,12 +159,16 @@ function saveRelayCfgLocal(c) {
 let lastState = null;
 let currentParams = loadParams();
 let currentRelayCfg = loadRelayCfg();
+let dirtyParams = false;
+const dirtyRelayIds = new Set();
 
 // Si el firmware envía params/configs en /api/state, los preferimos.
 function ingestServerState(s) {
   if (s && s.params && typeof s.params === 'object') {
-    currentParams = Object.assign({}, DEFAULT_PARAMS, s.params);
-    saveParamsLocal(currentParams);
+    if (!dirtyParams) {
+      currentParams = Object.assign({}, DEFAULT_PARAMS, s.params);
+      saveParamsLocal(currentParams);
+    }
   }
   if (s && s.relays && typeof s.relays === 'object') {
     let touched = false;
@@ -172,6 +176,11 @@ function ingestServerState(s) {
       const r = s.relays['r' + i];
       if (!r) continue;
       const cfg = currentRelayCfg['r' + i] || {};
+      if (dirtyRelayIds.has(i)) {
+        if (r.on !== undefined && cfg.on == null) cfg.on = !!r.on;
+        currentRelayCfg['r' + i] = cfg;
+        continue;
+      }
       // El firmware puede enviar modeKind ("auto"/"manual"/"timer") o mode numérico.
       if (r.modeKind) { cfg.mode = r.modeKind; touched = true; }
       else if (r.mode !== undefined) {
@@ -214,6 +223,7 @@ const RELAY_ICONS = {
   7: '💡', // Iluminación 2
   8: '🚿'  // Irrigación 2
 };
+const TIMER_LABEL_RELAYS = new Set([3, 4, 7, 8]);
 
 const MODE_TEXT = {
   '0': 'Apagado', '1': 'Manual', '2': 'Auto',
@@ -317,17 +327,20 @@ function renderDevices() {
     const name = r.name || RELAY_DEFAULT_NAMES[i] || ('R' + i);
     const icon = RELAY_ICONS[i] || '⚡';
 
-    const modeBtns = ['auto','manual','timer'].map(k => `
-      <button type="button" class="mode-btn ${cfg.mode === k ? 'sel' : ''}"
+    const useTimerLabel = TIMER_LABEL_RELAYS.has(i);
+    const modes = useTimerLabel ? ['auto','manual'] : ['auto','manual','timer'];
+    const activeMode = useTimerLabel && cfg.mode === 'timer' ? 'auto' : cfg.mode;
+    const modeBtns = modes.map(k => `
+      <button type="button" class="mode-btn ${activeMode === k ? 'sel' : ''}"
               onclick="setRelayMode(${i}, '${k}')">
-        ${k === 'auto' ? 'Auto' : k === 'manual' ? 'Manual' : 'Timer'}
+        ${k === 'auto' ? (useTimerLabel ? 'Timer' : 'Auto') : k === 'manual' ? 'Manual' : 'Timer'}
       </button>
     `).join('');
 
     let extra = '';
-    if (cfg.mode === 'auto') {
+    if (activeMode === 'auto') {
       extra = `<div class="mode-extra"><div class="hint">${escapeHtml(autoHintFor(i))}</div></div>`;
-    } else if (cfg.mode === 'manual') {
+    } else if (activeMode === 'manual') {
       extra = `
         <div class="mode-extra">
           <div class="manual-actions">
@@ -335,7 +348,7 @@ function renderDevices() {
             <button type="button" class="btn-off" onclick="setManualState(${i}, false)">APAGAR</button>
           </div>
         </div>`;
-    } else if (cfg.mode === 'timer') {
+    } else if (activeMode === 'timer') {
       extra = `
         <div class="mode-extra">
           <div class="timer-grid">
@@ -387,6 +400,7 @@ function setRelayMode(i, kind) {
   const cfg = currentRelayCfg['r' + i] || {};
   cfg.mode = kind;
   currentRelayCfg['r' + i] = cfg;
+  dirtyRelayIds.add(i);
   saveRelayCfgLocal(currentRelayCfg);
   renderDevices();
 }
@@ -394,6 +408,7 @@ function setTimerTime(i, key, val) {
   const cfg = currentRelayCfg['r' + i] || {};
   cfg[key] = val;
   currentRelayCfg['r' + i] = cfg;
+  dirtyRelayIds.add(i);
   saveRelayCfgLocal(currentRelayCfg);
 }
 function setManualState(i, on) {
@@ -410,6 +425,7 @@ async function saveAllRelays() {
   try {
     for (let i = 1; i <= 8; i++) await postRelay(i);
     showToast('Dispositivos guardados');
+    dirtyRelayIds.clear();
     loadState();
   } catch {
     showToast('Guardado localmente (firmware sin /api/relay)', true);
@@ -440,8 +456,12 @@ async function postRelay(i) {
 // =========================
 function renderParams() {
   const p = currentParams;
-  setQuadRange('temp', p.tempHeaterOn, p.tempHeaterOff, p.tempAcOff, p.tempAcOn);
-  setQuadRange('hum',  p.humHumidOn,  p.humHumidOff,  p.humDehumOff, p.humDehumOn);
+  const tempVals = normalizeQuadValues('temp', [p.tempHeaterOn, p.tempHeaterOff, p.tempAcOff, p.tempAcOn]);
+  const humVals  = normalizeQuadValues('hum',  [p.humHumidOn,  p.humHumidOff,  p.humDehumOff, p.humDehumOn]);
+  QUAD_KEYS.temp.forEach((k, i) => { currentParams[k] = tempVals[i]; });
+  QUAD_KEYS.hum.forEach((k, i) => { currentParams[k] = humVals[i]; });
+  setQuadRange('temp', ...tempVals);
+  setQuadRange('hum',  ...humVals);
 
   // selects de asignación: 6 relés + ninguno
   ['acRelay','heaterRelay','humidRelay','dehumidRelay'].forEach(key => {
@@ -458,6 +478,22 @@ function renderParams() {
   });
 }
 
+function normalizeQuadValues(key, values) {
+  const cfg = QUAD_CFG[key];
+  const go = cfg.gapOuter, gi = cfg.gapInner;
+  let [v1, v2, v3, v4] = values.map(v => parseFloat(v));
+  if (![v1, v2, v3, v4].every(isFinite)) {
+    [v1, v2, v3, v4] = key === 'temp' ? [18, 22, 25, 28] : [40, 55, 65, 75];
+  }
+  v1 = Math.max(cfg.min, Math.min(cfg.max, v1));
+  v4 = Math.max(cfg.min, Math.min(cfg.max, v4));
+  v2 = Math.max(v1 + go, Math.min(v3 - gi, v2));
+  v3 = Math.max(v2 + gi, Math.min(v4 - go, v3));
+  v2 = Math.max(cfg.min, Math.min(cfg.max, v2));
+  v3 = Math.max(cfg.min, Math.min(cfg.max, v3));
+  return [v1, v2, v3, v4];
+}
+
 function setQuadRange(key, v1, v2, v3, v4) {
   [v1, v2, v3, v4].forEach((val, i) => {
     const el = byId('qr-' + key + '-' + (i + 1));
@@ -470,7 +506,8 @@ function setQuadRange(key, v1, v2, v3, v4) {
 function onQuadRange(key, which) {
   for (let i = 1; i <= 4; i++) {
     const el = byId('qr-' + key + '-' + i);
-    if (el) el.style.zIndex = (i === which) ? '6' : '';
+    const thumb = byId('qt-' + key + '-' + i);
+    if (thumb) thumb.classList.toggle('is-active', i === which);
   }
   const cfg = QUAD_CFG[key];
   const go = cfg.gapOuter, gi = cfg.gapInner;
@@ -492,6 +529,7 @@ function onQuadRange(key, which) {
     if (el) el.value = val;
     currentParams[QUAD_KEYS[key][i]] = val;
   });
+  dirtyParams = true;
   saveParamsLocal(currentParams);
   updateQuadFill(key, v1, v2, v3, v4);
   updateQuadLabels(key, v1, v2, v3, v4);
@@ -501,21 +539,25 @@ function updateQuadFill(key, v1, v2, v3, v4) {
   const cfg = QUAD_CFG[key];
   const span = cfg.max - cfg.min;
   const pct = v => (v - cfg.min) / span * 100;
-  const cold = byId('qf-' + key + '-cold');
-  const hot  = byId('qf-' + key + '-hot');
+  const cold    = byId('qf-' + key + '-cold');
+  const comfort = byId('qf-' + key + '-comfort');
+  const hot     = byId('qf-' + key + '-hot');
   if (cold) { cold.style.left = pct(v1) + '%'; cold.style.width = (pct(v2) - pct(v1)) + '%'; }
-  if (hot)  { hot.style.left  = pct(v3) + '%'; hot.style.width  = (pct(v4) - pct(v3)) + '%'; }
+  if (comfort) { comfort.style.left = pct(v2) + '%'; comfort.style.width = (pct(v3) - pct(v2)) + '%'; }
+  if (hot)  { hot.style.left = pct(v3) + '%'; hot.style.width = (pct(v4) - pct(v3)) + '%'; }
 }
 
 function applySetpoint(key) {
   const el = byId('sp-' + key);
   if (!el) return;
-  const S = parseFloat(el.value);
+  let S = parseFloat(el.value);
   if (!isFinite(S)) return;
   const { min: absMin, max: absMax, step, gapOuter: go, gapInner: gi } = QUAD_CFG[key];
-  // center the comfort zone (v2..v3) on S with minimum gaps
-  let v2 = Math.round((S - gi / 2) / step) * step;
-  let v3 = v2 + gi;
+  const roundToStep = v => Math.round(v / step) * step;
+  S = Math.max(absMin, Math.min(absMax, roundToStep(S)));
+  const halfInner = Math.ceil((gi / 2) / step) * step;
+  let v2 = roundToStep(S - halfInner);
+  let v3 = roundToStep(S + halfInner);
   let v1 = v2 - go;
   let v4 = v3 + go;
   // clamp to absolute range
@@ -524,6 +566,7 @@ function applySetpoint(key) {
   v2 = Math.max(v1 + go, Math.min(v3 - gi, v2));
   v3 = Math.max(v2 + gi, Math.min(v4 - go, v3));
   QUAD_KEYS[key].forEach((k, i) => { currentParams[k] = [v1, v2, v3, v4][i]; });
+  dirtyParams = true;
   saveParamsLocal(currentParams);
   setQuadRange(key, v1, v2, v3, v4);
 }
@@ -534,6 +577,33 @@ function updateQuadLabels(key, v1, v2, v3, v4) {
     const el = byId('qv-' + key + '-' + (i + 1));
     if (el) el.textContent = fmt(val);
   });
+  updateQuadScale(key, v1, v2, v3, v4);
+}
+
+function updateQuadScale(key, v1, v2, v3, v4) {
+  const cfg = QUAD_CFG[key];
+  const span = cfg.max - cfg.min;
+  const pct = v => (v - cfg.min) / span * 100;
+  const pointText = v => key === 'temp' ? v.toFixed(1) : String(Math.round(v));
+  [v1, v2, v3, v4].forEach((val, i) => {
+    const el = byId('qp-' + key + '-' + (i + 1));
+    const thumb = byId('qt-' + key + '-' + (i + 1));
+    const left = pct(val) + '%';
+    if (el) {
+      el.style.left = left;
+      el.textContent = pointText(val);
+    }
+    if (thumb) thumb.style.left = left;
+  });
+
+  const center = (v2 + v3) / 2;
+  const marker = byId('qc-' + key);
+  const markerValue = byId('qcv-' + key);
+  const setpoint = byId('sp-' + key);
+  const icon = key === 'temp' ? '🌡️' : '💧';
+  if (marker) marker.style.left = pct(center) + '%';
+  if (markerValue) markerValue.innerHTML = `<span class="quad-setpoint-icon">${icon}</span>${pointText(center)}`;
+  if (setpoint) setpoint.value = key === 'temp' ? center.toFixed(1) : String(Math.round(center));
 }
 
 function formatParam(key, val) {
@@ -545,6 +615,7 @@ function formatParam(key, val) {
 
 function onAssignChange(key, val) {
   currentParams[key] = parseInt(val, 10) || 0;
+  dirtyParams = true;
   saveParamsLocal(currentParams);
 }
 
@@ -562,6 +633,7 @@ async function saveParams() {
     });
     if (!res.ok) throw new Error();
     showToast('Parámetros guardados');
+    dirtyParams = false;
     loadState();
   } catch {
     showToast('Guardado localmente (firmware sin /api/params)', true);
@@ -847,7 +919,7 @@ async function loadInfo() {
 // =========================
 // Sensores (/api/sensors)
 // =========================
-const SENSOR_CFG_KEY = 'druida_sensors_v1';
+const SENSOR_CFG_KEY = 'druida_sensors_v2';
 
 const SENSOR_DEFAULTS = [
   { id:'s1', name:'Ambiente 1', type:'ambient', addr:'1', enabled:true  },
@@ -886,9 +958,15 @@ async function loadSensors() {
         const srv = d.sensors.find(s => s.id === cfg.id || s.addr == cfg.addr);
         if (!srv) return cfg;
         return Object.assign({}, cfg, {
+          enabled: srv.enabled !== undefined ? !!srv.enabled : cfg.enabled,
           connected: srv.connected,
-          temp: srv.temp, hum: srv.hum,
-          moisture: srv.moisture,
+          temp: numberOrNull(srv.temp),
+          hum: numberOrNull(srv.hum),
+          dpv: numberOrNull(srv.dpv),
+          ec: numberOrNull(srv.ec),
+          moisture: numberOrNull(srv.moisture ?? srv.hum),
+          addr: srv.addr != null ? String(srv.addr) : cfg.addr,
+          type: srv.type || cfg.type,
           name: srv.name || cfg.name
         });
       });
@@ -904,11 +982,11 @@ function renderSensors() {
   const canAddSoil    = soil.length < 2;
 
   byId('sensorsAmbient').innerHTML =
-    ambient.map(sensorCardHtml).join('') +
+    (ambient.length ? ambient.map(sensorCardHtml).join('') : `<div class="sensor-empty">Sensor ambiente ID 1 incluido de fabrica.</div>`) +
     (canAddAmbient ? `<button class="add-sensor-btn" onclick="addSensor('ambient')">+ Agregar sensor de ambiente</button>` : '');
 
   byId('sensorsSoil').innerHTML =
-    soil.map(sensorCardHtml).join('') +
+    (soil.length ? soil.map(sensorCardHtml).join('') : `<div class="sensor-empty">No hay sensores de suelo agregados.</div>`) +
     (canAddSoil ? `<button class="add-sensor-btn" onclick="addSensor('soil')">+ Agregar sensor de suelo</button>` : '');
 }
 
@@ -923,8 +1001,13 @@ function addSensor(type) {
 function removeSensor(id) {
   const s = currentSensors.find(x => x.id === id);
   if (!s) return;
+  if (s.id === 's1') {
+    showToast('El sensor ambiente 1 viene de fabrica');
+    return;
+  }
   s.enabled = false;
   saveSensorCfgLocal(currentSensors);
+  saveSensorEnabledToDevice(s, false);
   showToast('Sensor eliminado');
   showPreloadedSensors();
 }
@@ -938,8 +1021,10 @@ function sensorCardHtml(s) {
   if (s.type === 'ambient') {
     if (s.temp != null) reading += s.temp.toFixed(1) + '°C';
     if (s.hum  != null) reading += (reading ? '<br>' : '') + Math.round(s.hum) + '% HR';
+    if (s.dpv  != null) reading += (reading ? '<br>' : '') + 'DPV ' + s.dpv.toFixed(1);
   } else {
     if (s.moisture != null) reading += 'Hum: ' + Math.round(s.moisture) + '%';
+    if (s.ec != null)       reading += (reading ? '<br>' : '') + 'EC ' + Math.round(s.ec);
     if (s.temp != null)     reading += (reading ? '<br>' : '') + s.temp.toFixed(1) + '°C';
   }
   if (!reading) reading = conn_unknown ? '<span style="color:var(--text-3)">sin datos</span>' : '';
@@ -978,18 +1063,18 @@ function showSensorConfig(id) {
     <label class="cfg-label">Nombre</label>
     <input type="text" id="scName" class="cfg-input" value="${escapeHtml(s.name)}">
     <label class="cfg-label">Dirección / ID</label>
-    <input type="text" id="scAddr" class="cfg-input" value="${escapeHtml(s.addr)}"
+    <input type="number" id="scAddr" class="cfg-input" value="${escapeHtml(s.addr)}" min="${s.type === 'ambient' ? 1 : 5}" max="${s.type === 'ambient' ? 4 : 6}" step="1"
            placeholder="Ej: 1  ·  0x40  ·  28FF3A...">
     <div class="param-hint" style="margin-top:6px">
       Usá el mismo identificador que configuraste en el firmware
       (número Modbus, dirección I²C en hex, o ROM de sensor 1-Wire).
     </div>
     <label class="cfg-label">Tipo</label>
-    <select id="scType" class="cfg-select">
+    <select id="scType" class="cfg-select" disabled>
       <option value="ambient" ${s.type==='ambient'?'selected':''}>Ambiente (T° y HR)</option>
       <option value="soil"    ${s.type==='soil'   ?'selected':''}>Suelo (humedad)</option>
     </select>
-    <button type="button" class="btn-remove-sensor" onclick="removeSensor('${s.id}')">Eliminar sensor</button>`;
+    ${s.id === 's1' ? '' : `<button type="button" class="btn-remove-sensor" onclick="removeSensor('${s.id}')">Eliminar sensor</button>`}`;
   setView('sensorConfigView');
 }
 
@@ -997,11 +1082,16 @@ function saveSensorConfig() {
   const s = currentSensors.find(x => x.id === editingSensorId);
   if (!s) return;
   s.name = (byId('scName').value || s.name).trim();
-  s.addr = (byId('scAddr').value || s.addr).trim();
   s.type = byId('scType').value;
+  const addr = normalizeSensorAddress(s.type, byId('scAddr').value || s.addr);
+  if (!addr) {
+    showToast(s.type === 'ambient' ? 'ID ambiente valido: 1 a 4' : 'ID suelo valido: 5 o 6', true);
+    return;
+  }
+  s.addr = String(addr);
+  s.enabled = true;
   saveSensorCfgLocal(currentSensors);
-  // enviar al firmware
-  const body = new URLSearchParams({ id: s.id, name: s.name, addr: s.addr, type: s.type });
+  const body = new URLSearchParams({ id: s.id, name: s.name, addr: s.addr, sensor: s.addr, type: s.type, enabled: '1' });
   fetch('/api/sensor', {
     method:'POST',
     headers:{'Content-Type':'application/x-www-form-urlencoded','X-Requested-With':'XMLHttpRequest'},
@@ -1009,6 +1099,27 @@ function saveSensorConfig() {
   }).catch(() => {});
   showToast('Sensor guardado');
   showPreloadedSensors();
+}
+
+function numberOrNull(v) {
+  if (v === null || v === undefined || v === '--') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function normalizeSensorAddress(type, raw) {
+  const n = parseInt(String(raw).replace(/[^\d]/g, ''), 10);
+  if (type === 'ambient') return n >= 1 && n <= 4 ? n : 0;
+  return n >= 5 && n <= 6 ? n : 0;
+}
+
+function saveSensorEnabledToDevice(s, enabled) {
+  const body = new URLSearchParams({ sensor: s.addr, enabled: enabled ? '1' : '0' });
+  fetch('/api/sensor', {
+    method:'POST',
+    headers:{'Content-Type':'application/x-www-form-urlencoded','X-Requested-With':'XMLHttpRequest'},
+    body
+  }).catch(() => {});
 }
 
 // =========================
