@@ -1,0 +1,15 @@
+# Archivos compilados / binarios generados
+build/
+*.bin
+
+# Archivos de configuración local del IDE
+.claude/
+.theia/
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Archivos temporales
+*.tmp
+*.log
