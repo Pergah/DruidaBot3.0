@@ -748,6 +748,19 @@ static void applySensorCmd(const String& json) {
 
 // ── Guardar configuración WiFi ────────────────────────────────
 static void applyWifiCmd(const String& json) {
+  // Desconexión WiFi — equivale a handleDisconnectWiFi() pero desde MQTT
+  String action = _pStr(json, "action", "");
+  if (action == "disconnect") {
+    modoWiFi = 0;
+    GuardadoConfig();
+    WiFi.disconnect(true);
+    Serial.println("[MQTT WIFI] Desconectado. modoWiFi = 0");
+    delay(2000);
+    ESP.restart();
+    return;
+  }
+
+  // Cambio de red WiFi
   String newSsid = _pStr(json, "ssid", "");
   String newPass = _pStr(json, "pass", "");
   if (newSsid.length() == 0) return;
