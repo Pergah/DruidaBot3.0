@@ -1564,12 +1564,8 @@ void loop() {
 // SENSOR AMBIENTE PRINCIPAL (ID 1) + lógica existente
 // =================================================
 controlarRelaysYMedirSensores(localHour, minute, day, temperature, humedad);
-
-// Reflejar en variables nuevas
-temperatura1 = temperature;
-humedad1     = humedad;
-sensorAmbOK1 = isfinite(temperatura1) && isfinite(humedad1);
-if (sensorAmbOK1) lastAirRead1 = nowMs;
+// temperatura1/humedad1/sensorAmbOK1/lastAirRead1 son gestionados dentro de
+// controlarRelaysYMedirSensores para evitar que se sobreescriban con el promedio.
 
 
 // =================================================
@@ -2001,10 +1997,28 @@ void controlarRelaysYMedirSensores(int hour, int minute, int day, float &tempera
   float soilTempR3 = NAN, soilHumR3 = NAN, soilECR3 = NAN;
   float soilTempR8 = NAN, soilHumR8 = NAN, soilECR8 = NAN;
 
-  // Resolver sensor virtual unificado de temperatura (R1, R2)
+  // Leer sensor físico 1 antes de resolver el virtual.
+  // Los sensores 2-4 se actualizan periódicamente en el bloque de 5 s del loop;
+  // el sensor 1 no tiene ese bloque, así que lo leemos aquí para que
+  // resolverSensorVirtualAmbiente siempre encuentre temperatura1 fresca.
+  {
+    float rawT1 = NAN, rawH1 = NAN;
+    if (rs485ReadTH(AIR_ID_1, rawT1, rawH1)) {
+      temperatura1 = rawT1;
+      humedad1     = rawH1;
+      sensorAmbOK1 = true;
+      lastAirRead1 = millis();
+    } else {
+      sensorAmbOK1 = false;
+    }
+  }
+
+  // Resolver sensor virtual unificado de temperatura (tempSensor puede ser 1, 2, 12, etc.)
   float avgTempT = NAN, avgHumT = NAN;
   if (!resolverSensorVirtualAmbiente(tempSensor, avgTempT, avgHumT)) {
-    rs485ReadTH(AIR_ID_1, avgTempT, avgHumT);
+    // Todos los sensores configurados están desconectados — usar sensor 1 como último recurso
+    avgTempT = temperatura1;
+    avgHumT  = humedad1;
   }
 
   // Resolver sensor virtual unificado de humedad (R5, R6)
