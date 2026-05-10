@@ -1017,6 +1017,25 @@ static void applyCycleCmd(const String& json) {
     GuardadoR4();
     Serial.println("[cycle] Ciclo completo reseteado");
   }
+  else if (action == "setVegeDay") {
+    int d = (int)_pFloat(json, "day", 1);
+    if (d < 1) d = 1;
+    vegeActive     = true;
+    vegeDays       = d;
+    vegeStartEpoch = (uint32_t)(nowUtc - (int64_t)(d - 1) * 86400LL);
+    lastDateKey    = 0;
+    GuardadoR4();
+    Serial.printf("[cycle] Vegetativo → Día %d\n", d);
+  }
+  else if (action == "setFloraDay") {
+    int d = (int)_pFloat(json, "day", 1);
+    if (d < 1) d = 1;
+    floraActive     = true;
+    floraDays       = d;
+    floraStartEpoch = (uint32_t)(nowUtc - (int64_t)(d - 1) * 86400LL);
+    GuardadoR4();
+    Serial.printf("[cycle] Floración → Día %d\n", d);
+  }
   requestStatePublish();
 }
 
