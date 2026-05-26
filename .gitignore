@@ -1,0 +1,13 @@
+# Source local (data/, landing/ se mantienen fuera del repo)
+data/
+landing/
+
+# Build artifacts de Arduino
+build/
+
+# Editor / IDE
+.claude/
+.theia/
+
+# Secretos
+pwsupabase.txt
