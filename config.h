@@ -193,6 +193,7 @@
 // Nombres personalizados de relay (char[20] cada uno, gap libre 742-799)
 #define EEPROM_R7_CUSTOM_NAME       742  // char[20]: nombre libre para R7
 #define EEPROM_R8_CUSTOM_NAME       762  // char[20]: nombre libre para R8
+#define EEPROM_PPFD_ACTIVE          782  // uint8_t: ppfdActivo (0=off, 1=on)
 
 // ===== Direcciones EEPROM para config IR A/C =====
 // Struct IRCfg (146 bytes) almacenada a partir de EEPROM_IR_CFG_ADDR.
@@ -257,6 +258,8 @@
 #define MODBUS_ID_SOIL 1   // Sensor suelo: temp, hum, EC
 
 #define MODBUS_ID_AIR  2   // Sensor ambiente: temp, hum
+
+#define PPFD_ID        7   // ZTS-300AL-GH-N01 PAR sensor (Modbus addr cambiada de fábrica 1→7)
 
 
 #include <QRCodeGenerator.h>
@@ -906,6 +909,12 @@ float soilEC   = NAN;
 bool soilSensorOK = false;
 unsigned long lastSoilRead = 0;
 
+// ====== PPFD sensor (ZTS-300AL-GH-N01, Modbus ID=PPFD_ID) ======
+float    g_ppfd       = NAN;
+bool     ppfdSensorOK = false;
+uint32_t lastPpfdRead = 0;
+bool     ppfdActivo   = false; // habilitado desde el panel de admin
+
 String cachedHTML;
 String cachedCSS;
 String cachedJS;
@@ -919,9 +928,9 @@ bool sensorSoil5Activo = false;
 bool sensorSoil6Activo = false;
 
 // --- Suspensión automática por fallos consecutivos ---
-// índice 0 no se usa, índices 1-4 = aire, 5-6 = suelo
-static uint8_t  rs485FailCount[7]      = {0};
-static uint32_t rs485SuspendedUntil[7] = {0};
+// índice 0 no se usa, índices 1-4 = aire, 5-6 = suelo, 7 = PPFD
+static uint8_t  rs485FailCount[8]      = {0};
+static uint32_t rs485SuspendedUntil[8] = {0};
 static const uint8_t  RS485_MAX_FAILS       = 3;
 static const uint32_t RS485_SUSPEND_MS      = 60000UL; // 1 minuto
 
@@ -992,8 +1001,10 @@ String   g_cannDeviceId        = "";
 String   g_cannCode            = "";
 uint32_t g_cannCodeGenMs       = 0;
 bool     g_cannHasToken        = false;
+bool     g_cannPairing         = false; // true solo cuando server responde invite:true
 int      g_cannIngestIntervalS = 15;
-uint32_t g_cannLastDiscoverMs  = 0;
+uint32_t g_cannLastInviteMs    = 0;    // timer poll /sensor-pair-invite
+uint32_t g_cannLastDiscoverMs  = 0;   // timer poll /sensor-discover (solo en modo pairing)
 uint32_t g_cannLastIngestMs    = 0;
 uint32_t g_cannRetryUntilMs    = 0;
 uint32_t g_cannBtnPressMs      = 0;
