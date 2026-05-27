@@ -13,6 +13,7 @@ HardwareSerial RS485(1);
 void GuardadoSensoresConfig();
 static bool modbusWriteSingleReg(uint8_t slaveId, uint16_t reg, uint16_t val);
 static void applyChangeIdCmd(const String& json);
+bool rs485ReadPPFD(float &ppfd);
 static inline int64_t nowUtcSec64();
 int normalizarCodigoSensoresAmbiente(int codigo);
 int normalizarCodigoSensoresSuelo(int codigo);
@@ -438,9 +439,10 @@ static void cannalyticsIngest(float temp_c, float hum_pct, float vpd_kpa) {
   Serial.printf("[CANN] ingest → HTTP %d\n", httpCode);
 
   if (httpCode == 401) {
-    Serial.println("[CANN] token inválido → modo PAIRING");
+    Serial.println("[CANN] token inválido → borrando token, esperando nuevo invite");
     cannalyticsClearNVS();
-    cannalyticsGenerateCode();
+    g_cannPairing = false;
+    g_cannCode    = "";
   } else if (httpCode == 429) {
     String resp = http.getString();
     StaticJsonDocument<128> doc;
@@ -464,9 +466,10 @@ static void cannalyticsBtnCheck(uint32_t nowMs) {
     g_cannBtnPressMs = 0;
   } else if (isLow && g_cannBtnWasLow &&
              (uint32_t)(nowMs - g_cannBtnPressMs) >= CANNALYTICS_BTN_HOLD_MS) {
-    Serial.println("[CANN] Botón reset pairing (5s) → borrando token");
+    Serial.println("[CANN] Botón reset pairing (5s) → borrando token, esperando nuevo invite");
     cannalyticsClearNVS();
-    cannalyticsGenerateCode();
+    g_cannPairing = false;
+    g_cannCode    = "";
     g_cannBtnPressMs = nowMs;
   }
 }
@@ -474,13 +477,49 @@ static void cannalyticsBtnCheck(uint32_t nowMs) {
 void cannalyticsInit() {
   cannalyticsComputeSerial();
   cannalyticsLoadNVS();
-  if (!g_cannHasToken) {
-    cannalyticsGenerateCode();
-  }
+  // Sin token: esperar invite del server, NO generar código aquí.
+  // La pantalla OLED sigue mostrando el dashboard normal hasta que
+  // /sensor-pair-invite devuelva invite:true.
   pinMode(CANNALYTICS_PAIRING_BTN_PIN, INPUT_PULLUP);
   Serial.printf("[CANN] Init OK — modo %s serial=%s\n",
-                g_cannHasToken ? "INGESTA" : "PAIRING",
+                g_cannHasToken ? "INGESTA" : "ESPERA_INVITE",
                 g_cannSerial.c_str());
+}
+
+// Pregunta al server si hay un invite activo para este serial.
+// invite:true  → activa modo pairing y genera código (si no había uno)
+// invite:false → desactiva modo pairing (vuelve a dashboard normal)
+static void cannalyticsCheckInvite() {
+  HTTPClient http;
+  WiFiClientSecure tmpClient;
+  tmpClient.setInsecure();
+  http.begin(tmpClient, CANNALYTICS_BASE_URL "/sensor-pair-invite");
+  http.addHeader("Content-Type", "application/json");
+  http.setTimeout(5000);
+
+  String body = "{\"serial\":\"" + g_cannSerial +
+                "\",\"fw_version\":\"" + FW_VERSION +
+                "\",\"model\":\"" + CANNALYTICS_MODEL + "\"}";
+  int httpCode = http.POST(body);
+  Serial.printf("[CANN] invite → HTTP %d\n", httpCode);
+
+  if (httpCode == 200) {
+    String resp = http.getString();
+    StaticJsonDocument<128> doc;
+    if (deserializeJson(doc, resp) == DeserializationError::Ok) {
+      bool invite = doc["invite"] | false;
+      if (invite && !g_cannPairing) {
+        g_cannPairing = true;
+        cannalyticsGenerateCode();
+        Serial.println("[CANN] invite:true → modo PAIRING activado");
+      } else if (!invite && g_cannPairing) {
+        g_cannPairing = false;
+        g_cannCode    = "";
+        Serial.println("[CANN] invite:false → volviendo a dashboard normal");
+      }
+    }
+  }
+  http.end();
 }
 
 void cannalyticsLoop(uint32_t nowMs, float temp_c, float hum_pct, float vpd_kpa) {
@@ -489,18 +528,28 @@ void cannalyticsLoop(uint32_t nowMs, float temp_c, float hum_pct, float vpd_kpa)
   if (WiFi.status() != WL_CONNECTED) return;
 
   if (!g_cannHasToken) {
-    if (g_cannCode.length() > 0 &&
-        (uint32_t)(nowMs - g_cannCodeGenMs) >= CANNALYTICS_CODE_ROTATE_MS) {
-      Serial.println("[CANN] Rotando code (15 min sin pairing)");
-      cannalyticsGenerateCode();
+    // Siempre pollear invite cada 10s (en background, OLED no cambia)
+    if (timeReached(nowMs, g_cannLastInviteMs, CANNALYTICS_DISCOVER_MS)) {
+      g_cannLastInviteMs = nowMs;
+      cannalyticsCheckInvite();
     }
-    if (timeReached(nowMs, g_cannLastDiscoverMs, CANNALYTICS_DISCOVER_MS)) {
-      cannalyticsDiscover();
+    // Solo si el server activó invite: rotar código y pollear discover
+    if (g_cannPairing) {
+      if (g_cannCode.length() > 0 &&
+          (uint32_t)(nowMs - g_cannCodeGenMs) >= CANNALYTICS_CODE_ROTATE_MS) {
+        Serial.println("[CANN] Rotando code (15 min sin pairing)");
+        cannalyticsGenerateCode();
+      }
+      if (timeReached(nowMs, g_cannLastDiscoverMs, CANNALYTICS_DISCOVER_MS)) {
+        g_cannLastDiscoverMs = nowMs;
+        cannalyticsDiscover();
+      }
     }
   } else {
     uint32_t ingestMs = max((uint32_t)g_cannIngestIntervalS * 1000UL,
                             CANNALYTICS_INGEST_DEFAULT_MS);
     if (timeReached(nowMs, g_cannLastIngestMs, ingestMs)) {
+      g_cannLastIngestMs = nowMs;
       cannalyticsIngest(temp_c, hum_pct, vpd_kpa);
     }
   }
@@ -560,6 +609,11 @@ static String buildStateJson() {
   j += _jFlt("temp", g_displayTemp, 1);
   j += _jFlt("hum",  g_displayHum, 1);
   j += _jFlt("dpv",  DPV,          2);
+  if (!isnan(g_ppfd) && isfinite(g_ppfd)) {
+    j += "\"ppfd\":"; j += String((int)roundf(g_ppfd)); j += ",";
+  } else {
+    j += "\"ppfd\":null,";
+  }
 
   // Fuente unificada con /api/state: variables software sincronizadas por el loop.
   j += "\"relays\":{";
@@ -714,6 +768,11 @@ static String buildStateJson() {
   j += ",\"temp\":"; j += jsonFlt(temperaturaSuelo6, 1);
   j += ",\"hum\":";  j += jsonFlt(humedadSuelo6, 1);
   j += ",\"ec\":";   j += jsonFlt(ECSuelo6, 0);
+  j += "}";
+  // PPFD S7
+  j += ",{\"id\":\"s7\",\"type\":\"ppfd\"";
+  j += ",\"enabled\":"; j += (ppfdActivo    ? "true" : "false");
+  j += ",\"connected\":"; j += (ppfdSensorOK ? "true" : "false");
   j += "}";
   j += "]";
 
@@ -1072,7 +1131,12 @@ static void applySensorCmd(const String& json) {
   else if (id == 4) sensorAir4Activo   = enabled;
   else if (id == 5) sensorSoil5Activo  = enabled;
   else if (id == 6) sensorSoil6Activo  = enabled;
-  if (canPersist) GuardadoSensoresConfig();
+  else if (id == 7) ppfdActivo         = enabled;
+  // Guardar siempre — un comando de usuario debe persistir independientemente
+  // del tiempo de uptime. GuardadoSensoresConfig es pequeño (solo sensores)
+  // y se puede llamar aunque canPersist sea false, porque para cuando llega
+  // un comando MQTT ya pasaron varios segundos de boot (WiFi + handshake).
+  GuardadoSensoresConfig();
   requestStatePublish();
 }
 
@@ -1731,10 +1795,13 @@ static void pushReadingsSupabase() {
     }
   };
 
-  appendNum("temp",     g_displayTemp);
-  appendNum("hum",      g_displayHum);
-  appendNum("dpv",      DPV);
-  appendNum("soil_hum", soilHum);
+  appendNum("temp",      g_displayTemp);
+  appendNum("hum",       g_displayHum);
+  appendNum("dpv",       DPV);
+  appendNum("soil_hum",  soilHum);
+  appendNum("soil_temp", soilTemp);
+  appendNum("soil_ec",   soilEC);
+  appendNum("ppfd",      (ppfdActivo && isfinite(g_ppfd)) ? g_ppfd : NAN);
 
   body += "}";
 
@@ -1742,8 +1809,9 @@ static void pushReadingsSupabase() {
   if (code != 200) {
     Serial.printf("[READINGS] POST %d body=%s\n", code, body.c_str());
   } else {
-    Serial.printf("[READINGS] OK temp=%.1f hum=%.1f dpv=%.1f soil=%.1f\n",
-                  g_displayTemp, g_displayHum, DPV, soilHum);
+    Serial.printf("[READINGS] OK temp=%.1f hum=%.1f dpv=%.1f soil_hum=%.1f soil_temp=%.1f ec=%.2f ppfd=%.0f\n",
+                  g_displayTemp, g_displayHum, DPV, soilHum, soilTemp, soilEC,
+                  (ppfdActivo && isfinite(g_ppfd)) ? g_ppfd : -1.0f);
   }
   http.end();
 }
@@ -2378,6 +2446,24 @@ if (timeReached(nowMs, lastExtraSensorsMs, 5000UL)) {
     sensorSueloOK6 = false;
   }
 
+  // -----------------------------
+  // PPFD ID 7 (ZTS-300AL-GH-N01)
+  // -----------------------------
+  {
+    float rawPpfd = NAN;
+    if (rs485ReadPPFD(rawPpfd) && isfinite(rawPpfd)) {
+      g_ppfd        = rawPpfd;
+      ppfdSensorOK  = true;
+      lastPpfdRead  = nowMs;
+    } else {
+      ppfdSensorOK = false;
+      // Mantener el último valor válido hasta 30s, luego NAN
+      if ((uint32_t)(nowMs - lastPpfdRead) > 30000UL) {
+        g_ppfd = NAN;
+      }
+    }
+  }
+
   // Compatibilidad temporal con tu código viejo
   soilTemp     = temperaturaSuelo5;
   soilHum      = humedadSuelo5;
@@ -2489,7 +2575,7 @@ if (timeReached(nowMs, lastExtraSensorsMs, 5000UL)) {
   String horaStr = (localHour < 10 ? "0" : "") + String(localHour) + ":" +
                    (minute < 10 ? "0" : "") + String(minute);
 
-  if (!g_cannHasToken && modoWiFi == 1 && WiFi.status() == WL_CONNECTED) {
+  if (g_cannPairing && modoWiFi == 1 && WiFi.status() == WL_CONNECTED) {
     cannalyticsShowPairing();
   } else if (qrAPActivo) {
     mostrarQR_AP();
@@ -3550,6 +3636,7 @@ if (magic == EEPROM_MAGIC_VALUE && _hh <= 23 && _mm <= 59) {
   EEPROM.get(EEPROM_SENSOR_AIR_ACTIVE + 3, b8); sensorAir4Activo = (b8 == 0xFF) ? false : (b8 != 0);
   EEPROM.get(EEPROM_SENSOR_SOIL_ACTIVE + 0, b8); sensorSoil5Activo = (b8 == 0xFF) ? false : (b8 != 0);
   EEPROM.get(EEPROM_SENSOR_SOIL_ACTIVE + 1, b8); sensorSoil6Activo = (b8 == 0xFF) ? false : (b8 != 0);
+  EEPROM.get(EEPROM_PPFD_ACTIVE, b8); ppfdActivo = (b8 == 0xFF) ? false : (b8 != 0);
 
   EEPROM.get(EEPROM_SENSOR_TEMP, i32);
   tempSensor = (i32 <= 0 || i32 > 4321) ? 1 : normalizarCodigoSensoresAmbiente(i32);
@@ -3863,6 +3950,7 @@ void Guardado_General() {
   EEPROM.put(EEPROM_SENSOR_AIR_ACTIVE + 3, (uint8_t)(sensorAir4Activo ? 1 : 0));
   EEPROM.put(EEPROM_SENSOR_SOIL_ACTIVE + 0, (uint8_t)(sensorSoil5Activo ? 1 : 0));
   EEPROM.put(EEPROM_SENSOR_SOIL_ACTIVE + 1, (uint8_t)(sensorSoil6Activo ? 1 : 0));
+  EEPROM.put(EEPROM_PPFD_ACTIVE,            (uint8_t)(ppfdActivo         ? 1 : 0));
 
   EEPROM.put(EEPROM_SENSOR_TEMP, (int32_t)tempSensor);
   EEPROM.put(EEPROM_SENSOR_HUM,  (int32_t)humSensor);
@@ -8170,6 +8258,37 @@ bool rs485ReadSoil(uint8_t sensorId, float &soilTemperature, float &soilHumedad,
   return true;
 }
 
+// ── Lectura sensor PPFD ZTS-300AL-GH-N01 (Modbus ID=PPFD_ID, reg 0x0000) ──
+// Rango: 0–4000 µmol/m²·s, resolución 1, valor raw = valor real sin factor.
+bool rs485ReadPPFD(float &ppfd) {
+  if (!ppfdActivo) { ppfd = NAN; return false; }
+
+  // Verificar suspensión por fallos previos
+  if (millis() < rs485SuspendedUntil[PPFD_ID]) {
+    ppfd = NAN;
+    return false;
+  }
+
+  uint16_t regs[1] = {0};
+  bool ok = modbusReadRegisters(PPFD_ID, 0x03, 0x0000, 1, regs);
+
+  if (!ok) {
+    rs485FailCount[PPFD_ID]++;
+    if (rs485FailCount[PPFD_ID] >= RS485_MAX_FAILS) {
+      rs485FailCount[PPFD_ID]      = 0;
+      rs485SuspendedUntil[PPFD_ID] = millis() + RS485_SUSPEND_MS;
+      Serial.printf("[RS485] PPFD sensor suspendido 60s por fallos\n");
+    }
+    ppfd = NAN;
+    return false;
+  }
+
+  rs485FailCount[PPFD_ID]      = 0;
+  rs485SuspendedUntil[PPFD_ID] = 0;
+  ppfd = (float)regs[0]; // µmol/m²·s directo, sin escala
+  return true;
+}
+
 static void rs485Rebegin(uint32_t baud, bool evenParity) {
   RS485.end();
   delay(50);
@@ -8263,12 +8382,12 @@ static bool modbusWriteSingleReg(uint8_t slaveId, uint16_t reg, uint16_t val) {
 }
 
 // ── Cambio de ID de sensor Modbus vía MQTT ─────────────────────────────
-// Payload JSON esperado: { "newId": 1..6 }
-// IDs 1-4 = sensores de ambiente, 5-6 = sensores de suelo.
-// IMPORTANTE: debe haber solo un sensor conectado físicamente.
+// Payload JSON esperado: { "newId": 1..7 }
+// IDs 1-4 = sensores de ambiente, 5-6 = sensores de suelo, 7 = PPFD.
+// IMPORTANTE: debe haber solo un sensor conectado físicamente al bus.
 static void applyChangeIdCmd(const String& json) {
   int newId = (int)_pFloat(json, "newId", 0);
-  if (newId < 1 || newId > 6) {
+  if (newId < 1 || newId > 7) {
     Serial.printf("[CHANGEID] newId inválido: %d\n", newId);
     return;
   }
@@ -8277,7 +8396,7 @@ static void applyChangeIdCmd(const String& json) {
 
   const uint32_t bauds[]    = {4800, 9600};
   const bool     parities[] = {false, true};  // false=8N1, true=8E1
-  const uint8_t  ids[]      = {1, 2, 3, 4, 5, 6};
+  const uint8_t  ids[]      = {1, 2, 3, 4, 5, 6, 7};
 
   bool     found     = false;
   uint8_t  foundId   = 0;
@@ -8287,7 +8406,7 @@ static void applyChangeIdCmd(const String& json) {
   for (uint8_t b = 0; b < 2 && !found; b++) {
     for (uint8_t p = 0; p < 2 && !found; p++) {
       rs485Rebegin(bauds[b], parities[p]);
-      for (uint8_t i = 0; i < 6 && !found; i++) {
+      for (uint8_t i = 0; i < 7 && !found; i++) {
         uint16_t v = 0;
         if (modbusReadHolding1(ids[i], REG_HUM, v)) {
           found     = true;
@@ -8684,6 +8803,7 @@ void GuardadoSensoresConfig() {
   EEPROM.put(EEPROM_SENSOR_AIR_ACTIVE + 3, (uint8_t)(sensorAir4Activo ? 1 : 0));
   EEPROM.put(EEPROM_SENSOR_SOIL_ACTIVE + 0, (uint8_t)(sensorSoil5Activo ? 1 : 0));
   EEPROM.put(EEPROM_SENSOR_SOIL_ACTIVE + 1, (uint8_t)(sensorSoil6Activo ? 1 : 0));
+  EEPROM.put(EEPROM_PPFD_ACTIVE,            (uint8_t)(ppfdActivo         ? 1 : 0));
 
   EEPROM.commit();
   Serial.println("Guardado de sensores realizado con exito.");
