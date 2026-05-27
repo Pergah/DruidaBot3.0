@@ -6511,6 +6511,9 @@ void handleApiSensors() {
   json += ",{\"id\":\"s6\",\"name\":\"Suelo 2\",\"type\":\"soil\",\"addr\":6,\"enabled\":" + jsonBool(sensorSoil6Activo) + ",\"connected\":" + jsonBool(sensorSueloOK6);
   json += ",\"temp\":" + jsonFlt(temperaturaSuelo6, 1) + ",\"hum\":" + jsonFlt(humedadSuelo6, 1) + ",\"ec\":" + jsonFlt(ECSuelo6, 0) + "}";
 
+  json += ",{\"id\":\"s7\",\"name\":\"PPFD 1\",\"type\":\"ppfd\",\"addr\":7,\"enabled\":" + jsonBool(ppfdActivo) + ",\"connected\":" + jsonBool(ppfdSensorOK);
+  json += ",\"ppfd\":" + jsonFlt(g_ppfd, 0) + "}";
+
   json += "],\"relaySensors\":{";
   json += "\"r1\":" + String(sensorR1) + ",\"r2\":" + String(sensorR2) + ",\"r3\":" + String(sensorR3);
   json += ",\"r5\":" + String(sensorR5) + ",\"r6\":" + String(sensorR6) + ",\"r8\":" + String(sensorR8);
@@ -6549,6 +6552,7 @@ void handleApiSensorSave() {
     else if (id == 4) sensorAir4Activo = enabled;
     else if (id == 5) sensorSoil5Activo = enabled;
     else if (id == 6) sensorSoil6Activo = enabled;
+    else if (id == 7) ppfdActivo = enabled;
   }
 
   GuardadoSensoresConfig();
