@@ -1760,6 +1760,86 @@ static void pollSupabaseCommands() {
 }
 
 // ══════════════════════════════════════════════════════════════════
+// PUSH DE ESTADO + POLL DE COMANDOS VÍA HTTPS (modo Enterprise)
+// ══════════════════════════════════════════════════════════════════
+// Reemplaza a pollSupabaseCommands() cuando wifiUser.length() > 0.
+// POST /api/device/state: envía el estado completo al servidor (HTTPS 443,
+// siempre abierto) y recibe comandos pendientes en la respuesta.
+// El servidor re-publica al broker MQTT desde Vercel → el stream SSE
+// del browser recibe los datos en tiempo real.
+// Un solo roundtrip HTTP = push de estado + poll de comandos.
+static void pushStateHttps() {
+  if (WiFi.status() != WL_CONNECTED || g_deviceId.length() == 0) return;
+
+  // Construir payload: insertar device_id al inicio del objeto JSON.
+  // buildStateJson() retorna "{...}" → lo convertimos en {"device_id":"XXX",...}
+  String stateJson = buildStateJson();
+  String body = "{\"device_id\":\"" + g_deviceId + "\"," + stateJson.substring(1);
+
+  WiFiClientSecure cl;
+  cl.setInsecure();
+  HTTPClient http;
+
+  if (!http.begin(cl, "https://app.datadruida.com.ar/api/device/state")) return;
+  http.addHeader("Content-Type", "application/json");
+  http.setTimeout(10000);
+
+  int code = http.POST(body);
+  if (code != 200) {
+    Serial.printf("[PUSH-STATE] HTTP %d\n", code);
+    http.end();
+    return;
+  }
+
+  String resp = http.getString();
+  http.end();
+
+  // Parsear respuesta para obtener comandos pendientes
+  DynamicJsonDocument doc(8192);
+  if (deserializeJson(doc, resp) != DeserializationError::Ok) {
+    Serial.println(F("[PUSH-STATE] JSON respuesta invalido"));
+    return;
+  }
+
+  JsonArray cmds = doc["commands"].as<JsonArray>();
+  if (cmds.isNull() || cmds.size() == 0) return;
+
+  Serial.printf("[PUSH-STATE] %u comandos pendientes\n", (unsigned)cmds.size());
+
+  for (JsonObject c : cmds) {
+    String cmdId   = c["id"]       | "";
+    String type    = c["cmd_type"] | "";
+    String payload = c["payload"]  | "";
+
+    Serial.printf("[PUSH-STATE] cmd=%s payload=%s\n", type.c_str(), payload.c_str());
+
+    // Dispatch: mismos handlers que usan MQTT y pollSupabaseCommands
+    if      (type == "relay")   applyRelayCmd(payload);
+    else if (type == "params")  applyParamsCmd(payload);
+    else if (type == "ota")     applyOTACmd(payload);
+    else if (type == "sensor")  applySensorCmd(payload);
+    else if (type == "wifi")    applyWifiCmd(payload);
+    else if (type == "restart") applyRestartCmd(payload);
+    else if (type == "state")   requestStatePublish();
+    else if (type == "cycle")   applyCycleCmd(payload);
+    else Serial.printf("[PUSH-STATE] tipo desconocido: %s\n", type.c_str());
+
+    // ACK: marcar comando como ejecutado en el servidor
+    if (cmdId.length() > 0) {
+      WiFiClientSecure cl2;
+      cl2.setInsecure();
+      HTTPClient http2;
+      if (http2.begin(cl2, "https://app.datadruida.com.ar/api/device/ack")) {
+        http2.addHeader("Content-Type", "application/json");
+        String ackBody = "{\"id\":\"" + cmdId + "\",\"device_id\":\"" + g_deviceId + "\"}";
+        http2.POST(ackBody);
+        http2.end();
+      }
+    }
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════
 // PUSH PERIÓDICO DE LECTURAS A SUPABASE (cada 15 minutos)
 // ══════════════════════════════════════════════════════════════════
 // Independiente de si hay browser abierto: el bot mismo persiste la
@@ -2228,10 +2308,13 @@ void loop() {
       if (!g_mqttClient.connected()) mqttConnect();
       g_mqttClient.loop();
     } else {
-      // Red enterprise: polling HTTPS cada 5 s (puerto 8883 bloqueado)
+      // Red enterprise: push estado + poll comandos vía HTTPS cada 5 s
+      // (puerto 8883/8884 bloqueado → usa HTTPS 443, siempre abierto)
+      // pushStateHttps() envía buildStateJson() al servidor y recibe
+      // comandos pendientes en la respuesta (un solo roundtrip HTTP).
       static uint32_t lastPollMs = 0;
       if (timeReached(nowMs, lastPollMs, 5000UL)) {
-        pollSupabaseCommands();
+        pushStateHttps();
       }
     }
   }
