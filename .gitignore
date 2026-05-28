@@ -1,9 +1,0 @@
-# Build artifacts de Arduino
-build/
-
-# Editor / IDE
-.claude/
-.theia/
-
-# Secretos
-pwsupabase.txt
