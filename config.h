@@ -206,6 +206,18 @@
 #define EEPROM_IR_LINK_ADDR 986   // IRLinkCfg (5 bytes)
 #define EEPROM_IR_LINK_MAGIC 0x1A
 
+// ===== Amplitud térmica nocturna (night offset) =====
+// Reduce los 4 umbrales de temperatura (heaterOn/Off, acOff/On) en N grados
+// cuando el relay de luz está apagado Y hay un ciclo de cultivo activo.
+// Libre: 991–1023 (33 bytes disponibles tras IR_LINK_ADDR+5).
+#define EEPROM_NIGHT_OFFSET    991  // float  (4 bytes): grados a restar de noche
+#define EEPROM_NIGHT_RELAY     995  // uint8_t(1 byte): 4=R4, 7=R7, 0=cualquiera
+#define EEPROM_NIGHT_MAGIC     996  // uint8_t(1 byte): validación
+#define EEPROM_NIGHT_MAGIC_VAL 0xB3
+
+static float   g_nightOffset = 0.0f;  // 0.0 = desactivado
+static uint8_t g_lightRelay  = 4;     // 4=R4 (default), 7=R7, 0=cualquiera
+
 #define IR_RELAY_FOLLOW_LOGIC 0  // relay fisico sigue la demanda del A/C
 #define IR_RELAY_TIMER_AUX    1  // relay fisico usa sus horarios TIMER
 

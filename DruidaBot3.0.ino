@@ -654,6 +654,9 @@ static String buildStateJson() {
   j += ",\"tempSensor\":" + String(tempSensor);
   j += ",\"humSensor\":"  + String(humSensor);
   j += ",\"soilSensor\":" + String(soilSensor);
+  // Amplitud térmica nocturna
+  j += ",\"nightOffset\":"; j += String(g_nightOffset, 1);
+  j += ",\"lightRelay\":";  j += String(g_lightRelay);
   j += "}";
 
   // Ciclo de cultivo
@@ -1140,6 +1143,26 @@ static void applyParamsCmd(const String& json) {
     if (tS > 0) tempSensor = normalizarCodigoSensoresAmbiente(tS);
     if (hS > 0) humSensor  = normalizarCodigoSensoresAmbiente(hS);
     if (sS > 0) soilSensor = normalizarCodigoSensoresSuelo(sS);
+  }
+
+  // Amplitud térmica nocturna
+  { float nOff = _pFloat(json,"nightOffset", NAN);
+    int   nRel = (int)_pFloat(json,"lightRelay", -1);
+    bool nightChanged = false;
+    if (!isnan(nOff) && nOff >= 0.0f && nOff <= 15.0f) {
+      g_nightOffset = roundf(nOff * 2.0f) / 2.0f;  // redondear a pasos de 0.5°C
+      nightChanged = true;
+    }
+    if (nRel == 0 || nRel == 4 || nRel == 7) {
+      g_lightRelay = (uint8_t)nRel;
+      nightChanged = true;
+    }
+    if (nightChanged && canPersist) {
+      EEPROM.put(EEPROM_NIGHT_OFFSET, g_nightOffset);
+      EEPROM.put(EEPROM_NIGHT_RELAY,  g_lightRelay);
+      EEPROM.put(EEPROM_NIGHT_MAGIC,  (uint8_t)EEPROM_NIGHT_MAGIC_VAL);
+      EEPROM.commit();
+    }
   }
 
   if (canPersist) Guardado_General();
@@ -2853,6 +2876,21 @@ static bool horarioTimerValido(int startMin, int offMin) {
          startMin != offMin;
 }
 
+// ── Amplitud térmica nocturna ────────────────────────────────────────────────
+// Devuelve los grados a restar de los 4 umbrales de temperatura cuando es de noche.
+// Solo aplica si: (1) g_nightOffset > 0, (2) hay ciclo activo, (3) la luz está apagada.
+static float nightAdjust() {
+  if (g_nightOffset < 0.01f) return 0.0f;        // feature desactivado
+  if (!vegeActive && !floraActive) return 0.0f;  // sin ciclo = sin ajuste
+  bool lightOn = false;
+  switch (g_lightRelay) {
+    case 0: lightOn = (estadoR4 == 1) || (estadoR7 == 1); break; // cualquiera
+    case 7: lightOn = (estadoR7 == 1); break;
+    default: lightOn = (estadoR4 == 1); break;  // case 4 (default)
+  }
+  return lightOn ? 0.0f : g_nightOffset;  // luz ON = día = sin ajuste
+}
+
 static void controlarSubeTemperatura(uint8_t relay, bool &relayEstado, float temperature, float minVal, float maxVal) {
   if (!temperaturaAmbienteValida(temperature) || !umbralesControlValidos(minVal, maxVal)) {
     apagarRelaySeguro(relay, relayEstado);
@@ -3169,17 +3207,21 @@ if (modoR6 == MANUAL) {
 
   // MODO AUTO FIJO POR FUNCION DEL RELAY
   // R1: sube temperatura | R5: sube humedad | R6: baja humedad
+  // nightAdj: desplaza TODOS los umbrales de temperatura hacia abajo de noche.
   int irCurrentTime = hour * 60 + minute;
+  const float nightAdj = nightAdjust();
   if (modoR1 == AUTO) {
+    const float r1Lo = minR1 - nightAdj;
+    const float r1Hi = maxR1 - nightAdj;
     if (g_irR1Linked) {
-      g_irHeatDemand = demandaBaja(temperatureR1, minR1, maxR1, g_irHeatDemand);
+      g_irHeatDemand = demandaBaja(temperatureR1, r1Lo, r1Hi, g_irHeatDemand);
       if (g_irR1RelayMode == IR_RELAY_TIMER_AUX) {
         controlarRelayTimerSimple(RELAY1, R1estado, irCurrentTime, horaOnR1 * 60 + minOnR1, horaOffR1 * 60 + minOffR1);
       } else {
         aplicarRelayPorDemanda(RELAY1, R1estado, g_irHeatDemand);
       }
     } else {
-      controlarSubeTemperatura(RELAY1, R1estado, temperatureR1, minR1, maxR1);
+      controlarSubeTemperatura(RELAY1, R1estado, temperatureR1, r1Lo, r1Hi);
     }
   }
 
@@ -3329,29 +3371,34 @@ int c;
   }
 }
 
-    if (modoR2 == AUTO) {
-      g_irCoolDemand = false;
-      controlarBajaTemperatura(RELAY2, R2estado, temperatureR2, minR2, maxR2);
-    } else if (modoR2 == IR_MODE) {
-      controlarIRac(temperatureR2, minR2, maxR2);
-    } else {
-      g_irCoolDemand = false;
-    }
+    {
+      // nightAdj ya fue calculado arriba (mismo tick → mismo valor)
+      const float r2Lo = minR2 - nightAdj;
+      const float r2Hi = maxR2 - nightAdj;
+      if (modoR2 == AUTO) {
+        g_irCoolDemand = false;
+        controlarBajaTemperatura(RELAY2, R2estado, temperatureR2, r2Lo, r2Hi);
+      } else if (modoR2 == IR_MODE) {
+        controlarIRac(temperatureR2, r2Lo, r2Hi);
+      } else {
+        g_irCoolDemand = false;
+      }
 
-    if (!(modoR1 == AUTO && g_irR1Linked)) g_irHeatDemand = false;
-    if (!(modoR6 == AUTO && g_irR6Linked)) g_irDryDemand = false;
+      if (!(modoR1 == AUTO && g_irR1Linked)) g_irHeatDemand = false;
+      if (!(modoR6 == AUTO && g_irR6Linked)) g_irDryDemand = false;
 
-    uint8_t irDesiredMode = IR_AC_OFF;
-    if (g_irCoolDemand)      irDesiredMode = IR_AC_COOL;
-    else if (g_irHeatDemand) irDesiredMode = IR_AC_HEAT;
-    else if (g_irDryDemand)  irDesiredMode = IR_AC_DRY;
+      uint8_t irDesiredMode = IR_AC_OFF;
+      if (g_irCoolDemand)      irDesiredMode = IR_AC_COOL;
+      else if (g_irHeatDemand) irDesiredMode = IR_AC_HEAT;
+      else if (g_irDryDemand)  irDesiredMode = IR_AC_DRY;
 
-    if (irDesiredMode != IR_AC_OFF) {
-      irApplyMode(irDesiredMode);
-    } else if (modoR2 == IR_MODE || g_irAcState != IR_AC_OFF) {
-      bool r2AutoDemand = (modoR2 == AUTO) && demandaAlta(temperatureR2, minR2, maxR2, R2estado == LOW);
-      if (!r2AutoDemand) irApplyMode(IR_AC_OFF);
-      else g_irAcState = IR_AC_OFF;
+      if (irDesiredMode != IR_AC_OFF) {
+        irApplyMode(irDesiredMode);
+      } else if (modoR2 == IR_MODE || g_irAcState != IR_AC_OFF) {
+        bool r2AutoDemand = (modoR2 == AUTO) && demandaAlta(temperatureR2, r2Lo, r2Hi, R2estado == LOW);
+        if (!r2AutoDemand) irApplyMode(IR_AC_OFF);
+        else g_irAcState = IR_AC_OFF;
+      }
     }
   // ===== RIEGO R3 (AUTO) =====
   if (modoR3 == AUTO) {
@@ -3928,6 +3975,22 @@ if (magic == EEPROM_MAGIC_VALUE && _hh <= 23 && _mm <= 59) {
       g_irR6Linked    = tmp.r6Linked != 0;
       g_irR1RelayMode = (tmp.r1RelayMode == IR_RELAY_TIMER_AUX) ? IR_RELAY_TIMER_AUX : IR_RELAY_FOLLOW_LOGIC;
       g_irR6RelayMode = (tmp.r6RelayMode == IR_RELAY_TIMER_AUX) ? IR_RELAY_TIMER_AUX : IR_RELAY_FOLLOW_LOGIC;
+    }
+  }
+
+  // Amplitud térmica nocturna
+  {
+    uint8_t nightMagic = EEPROM.read(EEPROM_NIGHT_MAGIC);
+    if (nightMagic == EEPROM_NIGHT_MAGIC_VAL) {
+      EEPROM.get(EEPROM_NIGHT_OFFSET, g_nightOffset);
+      EEPROM.get(EEPROM_NIGHT_RELAY,  g_lightRelay);
+      // Sanear valores corruptos
+      if (g_nightOffset < 0.0f || g_nightOffset > 15.0f || !isfinite(g_nightOffset)) g_nightOffset = 0.0f;
+      if (g_lightRelay != 0 && g_lightRelay != 4 && g_lightRelay != 7) g_lightRelay = 4;
+      Serial.printf("[NIGHT] nightOffset=%.1f lightRelay=%d\n", g_nightOffset, g_lightRelay);
+    } else {
+      g_nightOffset = 0.0f;
+      g_lightRelay  = 4;
     }
   }
 
@@ -5032,6 +5095,9 @@ void handleApiState() {
   json += ",\"heaterRelay\":1";
   json += ",\"humidRelay\":5";
   json += ",\"dehumidRelay\":6";
+  // Amplitud térmica nocturna
+  json += ",\"nightOffset\":" + String(g_nightOffset, 1);
+  json += ",\"lightRelay\":"  + String(g_lightRelay);
   // Nombres viejos para compatibilidad con código legado
   json += ",\"tempMin\":"  + String(minR1, 1);
   json += ",\"tempMax\":"  + String(maxR2, 1);
@@ -6791,6 +6857,24 @@ void handleApiParams() {
     int v = parseIntFlexible(server.arg("vpdAuxDelayMin"));
     if (v < 30) v = 30; if (v > 120) v = 120;
     vpdAuxDelayMin = (uint16_t)v;
+  }
+
+  // Amplitud térmica nocturna
+  { bool nightChanged = false;
+    if (server.hasArg("nightOffset")) {
+      float v = server.arg("nightOffset").toFloat();
+      if (v >= 0.0f && v <= 15.0f) { g_nightOffset = roundf(v * 2.0f) / 2.0f; nightChanged = true; }
+    }
+    if (server.hasArg("lightRelay")) {
+      int v = parseIntFlexible(server.arg("lightRelay"));
+      if (v == 0 || v == 4 || v == 7) { g_lightRelay = (uint8_t)v; nightChanged = true; }
+    }
+    if (nightChanged) {
+      EEPROM.put(EEPROM_NIGHT_OFFSET, g_nightOffset);
+      EEPROM.put(EEPROM_NIGHT_RELAY,  g_lightRelay);
+      EEPROM.put(EEPROM_NIGHT_MAGIC,  (uint8_t)EEPROM_NIGHT_MAGIC_VAL);
+      EEPROM.commit();
+    }
   }
 
   Guardado_General();
