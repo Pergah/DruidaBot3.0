@@ -11,6 +11,8 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <WiFiUdp.h>
+#include <ETH.h>
+#include <SPI.h>
 #include <NTPClient.h>
 #include <UniversalTelegramBot.h>
 #include <EEPROM.h>
@@ -702,6 +704,18 @@ static uint8_t decToBcd(int val) { return (uint8_t)((val / 10 * 16) + (val % 10)
 static int     bcdToDec(uint8_t val) { return (int)((val / 16 * 10) + (val % 16)); }
 
 
+// ===== Ethernet W5500 (SPI) — Waveshare ESP32-S3-ETH-8DI-8RO =====
+// El chip W5500 está conectado al bus SPI del ESP32-S3 con los siguientes pines.
+// Fuente: demo oficial Waveshare (WS_ETH.h).
+#define ETH_PHY_TYPE  ETH_PHY_W5500
+#define ETH_PHY_ADDR  1
+#define ETH_PHY_CS    16   // SPI Chip Select
+#define ETH_PHY_IRQ   12   // Interrupción (activo bajo)
+#define ETH_PHY_RST   39   // Reset (activo bajo)
+#define ETH_SPI_SCK   15
+#define ETH_SPI_MISO  14
+#define ETH_SPI_MOSI  13
+
 // ===== RS485 / Modbus RTU en Waveshare ESP32-S3-ETH-8DI-8RO =====
 static const int RS485_TX = 17;
 static const int RS485_RX = 18;
@@ -942,6 +956,17 @@ const uint32_t QR_AP_DURATION_MS = 30000UL;
 bool qrAPActivo = false;
 uint32_t qrAPStartMs = 0;
 uint8_t lastAPClients = 0;
+
+// ===== Ethernet — estado de conexión =====
+// g_ethConnected se setea en onEthEvent() (DruidaBot3.0.ino).
+// networkConnected() es el reemplazo de WiFi.status()==WL_CONNECTED:
+// retorna true si hay red disponible por cualquier interfaz.
+static bool      g_ethConnected = false;
+static IPAddress g_ethIP;
+
+static inline bool networkConnected() {
+  return g_ethConnected || (WiFi.status() == WL_CONNECTED);
+}
 
 // ===== Objetos MQTT globales =====
 WiFiClientSecure g_mqttTlsClient;

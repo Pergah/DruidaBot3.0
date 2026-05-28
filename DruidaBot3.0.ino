@@ -279,7 +279,7 @@ static void computeDeviceCode() {
 
 // ── Registro/heartbeat en el servidor cloud ─────────────────
 static void cloudRegisterDevice() {
-  if (g_deviceId.length() == 0 || g_deviceCode.length() == 0 || WiFi.status() != WL_CONNECTED) return;
+  if (g_deviceId.length() == 0 || g_deviceCode.length() == 0 || !networkConnected()) return;
   HTTPClient http;
   WiFiClientSecure tmpClient;
   tmpClient.setInsecure();
@@ -372,7 +372,7 @@ void cannalyticsShowPairing() {
 }
 
 static void cannalyticsDiscover() {
-  if (WiFi.status() != WL_CONNECTED) return;
+  if (!networkConnected()) return;
 
   HTTPClient http;
   WiFiClientSecure tmpClient;
@@ -417,7 +417,7 @@ static void cannalyticsDiscover() {
 }
 
 static void cannalyticsIngest(float temp_c, float hum_pct, float vpd_kpa) {
-  if (!g_cannHasToken || WiFi.status() != WL_CONNECTED) return;
+  if (!g_cannHasToken || !networkConnected()) return;
   if ((uint32_t)(millis()) < g_cannRetryUntilMs) return;
 
   HTTPClient http;
@@ -525,7 +525,7 @@ static void cannalyticsCheckInvite() {
 void cannalyticsLoop(uint32_t nowMs, float temp_c, float hum_pct, float vpd_kpa) {
   cannalyticsBtnCheck(nowMs);
 
-  if (WiFi.status() != WL_CONNECTED) return;
+  if (!networkConnected()) return;
 
   if (!g_cannHasToken) {
     // Siempre pollear invite cada 10s (en background, OLED no cambia)
@@ -686,6 +686,16 @@ static String buildStateJson() {
   j += ",\"wifiPass\":\"" + jsonEscape(password) + "\"";
   j += ",\"wifiPassLength\":"; j += String(password.length());
   j += ",\"wifiUser\":\"" + jsonEscape(wifiUser) + "\"";
+
+  // Ethernet — estado del link W5500
+  j += ",\"eth\":{";
+  j += "\"connected\":"; j += g_ethConnected ? "true" : "false";
+  if (g_ethConnected) {
+    j += ",\"ip\":\"";   j += g_ethIP.toString();   j += "\"";
+    j += ",\"speed\":";  j += String(ETH.linkSpeed());
+    j += ",\"full\":";   j += ETH.fullDuplex() ? "true" : "false";
+  }
+  j += "}";
 
   // RTC actual — contrato compartido con la webApp local
   datetime_t rtcNow;
@@ -1215,7 +1225,7 @@ static String hmacSha256Hex(const String& key, const String& data) {
 }
 
 static String tuyaFetchToken() {
-  if (WiFi.status() != WL_CONNECTED) return "";
+  if (!networkConnected()) return "";
   time_t nowSec = time(nullptr);
   if (nowSec < 1000000000L) { Serial.println(F("[IR] NTP no sincronizado")); return ""; }
 
@@ -1253,7 +1263,7 @@ static String tuyaFetchToken() {
 
 static bool tuyaTriggerScene(const char* sceneId) {
   if (!g_irConfigured || strlen(sceneId) == 0) return false;
-  if (WiFi.status() != WL_CONNECTED) return false;
+  if (!networkConnected()) return false;
 
   // Renovar token si expiró (cache 110 min para evitar límite de 2h)
   if (g_tuyaToken.isEmpty() || (millis() - g_tuyaTokenMs) > 6600000UL) {
@@ -1609,7 +1619,7 @@ static void setupMqttClient() {
 
 // ── Conectar / reconectar al broker MQTT ────────────────────
 static void mqttConnect() {
-  if (WiFi.status()!=WL_CONNECTED) return;
+  if (!networkConnected()) return;
   // Garantiza que el cliente esté inicializado, sin importar por qué camino
   // se llegó hasta acá (boot directo en STA, o transición AP→STA).
   setupMqttClient();
@@ -1694,7 +1704,7 @@ static void mqttConnect() {
 // El payload es JSON plano (no base64, a diferencia de MQTT).
 // Tras ejecutar cada comando, hace POST /api/device/ack con el id.
 static void pollSupabaseCommands() {
-  if (WiFi.status() != WL_CONNECTED || g_deviceId.length() == 0) return;
+  if (!networkConnected() || g_deviceId.length() == 0) return;
 
   WiFiClientSecure cl;
   cl.setInsecure();
@@ -1769,7 +1779,7 @@ static void pollSupabaseCommands() {
 // del browser recibe los datos en tiempo real.
 // Un solo roundtrip HTTP = push de estado + poll de comandos.
 static void pushStateHttps() {
-  if (WiFi.status() != WL_CONNECTED || g_deviceId.length() == 0) return;
+  if (!networkConnected() || g_deviceId.length() == 0) return;
 
   // Construir payload: insertar device_id al inicio del objeto JSON.
   // buildStateJson() retorna "{...}" → lo convertimos en {"device_id":"XXX",...}
@@ -1847,7 +1857,7 @@ static void pushStateHttps() {
 // dashboard tiene datos continuos 24/7 sin gaps.
 // Funciona en modo normal y enterprise (siempre que haya conexión).
 static void pushReadingsSupabase() {
-  if (WiFi.status() != WL_CONNECTED || g_deviceId.length() == 0) return;
+  if (!networkConnected() || g_deviceId.length() == 0) return;
 
   WiFiClientSecure cl;
   cl.setInsecure();
@@ -2065,6 +2075,12 @@ void setup() {
 
   registerWiFiEvents();
 
+  // ─── Ethernet W5500 ──────────────────────────────────────────
+  // Se inicializa ANTES del grace delay para que el chip negocie el
+  // link durante los 10 s de espera. Si hay cable, g_ethConnected
+  // quedará en true y se saltará el bloque WiFi debajo.
+  ethInit();
+
   // --- Pequeña espera post-boot para que el router levante tras un corte ---
   const uint32_t BOOT_GRACE_MS = 10000UL;
   uint32_t tStart = millis();
@@ -2076,7 +2092,20 @@ void setup() {
   // ===========================
   //   Conectividad de Red
   // ===========================
-  if (modoWiFi == 1) {
+
+  // ─── ETH primero ─────────────────────────────────────────────
+  // Si el cable Ethernet estaba enchufado, g_ethConnected ya es true
+  // (el evento GOT_IP llegó durante el boot-grace delay de 10 s).
+  // En ese caso arrancamos los servicios cloud sin tocar WiFi.
+  if (g_ethConnected) {
+    Serial.println(F("[ETH] Cable conectado al boot — iniciando servicios cloud."));
+    startWebServer();
+    SyncNTP_to_RTC();          // NTP via ETH (lwIP usa la interfaz activa)
+    setupMqttClient();
+    mqttConnect();             // MQTT sobre ETH: sin restricciones de puerto
+    cloudRegisterDevice();
+    cannalyticsInit();
+  } else if (modoWiFi == 1) {
     // Modo cliente (STA)
     connectToWiFi(ssid.c_str(), password.c_str());
 
@@ -2301,17 +2330,18 @@ void loop() {
   yield();
   manejarQRModoAP(nowMs);
 
-  // ─── MQTT (solo red normal) / Polling HTTPS (modo enterprise) ──
-  if (modoWiFi == 1 && WiFi.status() == WL_CONNECTED) {
-    if (wifiUser.length() == 0) {
-      // Red normal: MQTT en puerto 8883
+  // ─── MQTT / Polling HTTPS ───────────────────────────────────
+  // ETH tiene prioridad: si el cable está conectado se usa MQTT siempre
+  // (no hay restricciones de puerto en una red cableada empresarial).
+  // Solo se cae al modo enterprise-HTTPS si hay WiFi con usuario Y sin ETH.
+  if (networkConnected()) {
+    if (g_ethConnected || wifiUser.length() == 0) {
+      // ETH o WiFi normal → MQTT sobre 8883
       if (!g_mqttClient.connected()) mqttConnect();
       g_mqttClient.loop();
     } else {
-      // Red enterprise: push estado + poll comandos vía HTTPS cada 5 s
-      // (puerto 8883/8884 bloqueado → usa HTTPS 443, siempre abierto)
-      // pushStateHttps() envía buildStateJson() al servidor y recibe
-      // comandos pendientes en la respuesta (un solo roundtrip HTTP).
+      // WiFi enterprise sin ETH: HTTPS push+poll cada 5 s
+      // (puerto 8883 bloqueado → usa 443, siempre abierto)
       static uint32_t lastPollMs = 0;
       if (timeReached(nowMs, lastPollMs, 5000UL)) {
         pushStateHttps();
@@ -2320,13 +2350,13 @@ void loop() {
   }
 
   // ─── Heartbeat cloud (actualiza last_seen en Supabase) ──────
-  if (modoWiFi == 1 && timeReached(nowMs, g_lastCloudBeat, CLOUD_HEARTBEAT_INTERVAL_MS)) {
+  if (networkConnected() && timeReached(nowMs, g_lastCloudBeat, CLOUD_HEARTBEAT_INTERVAL_MS)) {
     cloudRegisterDevice();
   }
 
   // ─── Cannalytics pairing / ingest ───────────────────────────
   // DPV está en hPa; la API espera kPa → dividir por 10
-  if (modoWiFi == 1) {
+  if (networkConnected()) {
     cannalyticsLoop(nowMs, g_displayTemp, g_displayHum, DPV / 10.0f);
   }
 
@@ -2334,7 +2364,7 @@ void loop() {
   // Funciona independientemente del browser (anda 24/7) y de si la
   // red bloquea MQTT (siempre usa HTTPS directo). Llena los gaps que
   // dejaba el sync client-side cuando nadie tenía la pestaña abierta.
-  if (modoWiFi == 1) {
+  if (networkConnected()) {
     static uint32_t g_lastReadingsPush = 0;
     const  uint32_t READINGS_PUSH_INTERVAL_MS = 15UL * 60UL * 1000UL;  // 15 min
     if (timeReached(nowMs, g_lastReadingsPush, READINGS_PUSH_INTERVAL_MS)) {
@@ -2646,7 +2676,7 @@ if (timeReached(nowMs, lastExtraSensorsMs, 5000UL)) {
   if (!isnan(temperature) && temperature > 40.0f) {
     temperature = 40.0f;
 
-    if (!highTempAlertSent && WiFi.status() == WL_CONNECTED) {
+    if (!highTempAlertSent && networkConnected()) {
       bot.sendMessage(chat_id, "Alerta, temperatura demasiado alta");
       highTempAlertSent = true;
     }
@@ -2658,7 +2688,7 @@ if (timeReached(nowMs, lastExtraSensorsMs, 5000UL)) {
   String horaStr = (localHour < 10 ? "0" : "") + String(localHour) + ":" +
                    (minute < 10 ? "0" : "") + String(minute);
 
-  if (g_cannPairing && modoWiFi == 1 && WiFi.status() == WL_CONNECTED) {
+  if (g_cannPairing && networkConnected()) {
     cannalyticsShowPairing();
   } else if (qrAPActivo) {
     mostrarQR_AP();
@@ -5076,9 +5106,9 @@ void handleUpdateBackend() {
     return;
   }
 
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[OTA FW] ERROR: No hay WiFi.");
-    server.send(400, "text/plain", "No hay WiFi para actualizar Backend");
+  if (!networkConnected()) {
+    Serial.println("[OTA FW] ERROR: Sin red.");
+    server.send(400, "text/plain", "Sin conexión de red para actualizar Backend");
     return;
   }
 
@@ -5101,9 +5131,9 @@ void handleUpdateFrontend() {
     return;
   }
 
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[OTA FFat] ERROR: No hay WiFi.");
-    server.send(400, "text/plain", "No hay WiFi para actualizar Frontend");
+  if (!networkConnected()) {
+    Serial.println("[OTA FFat] ERROR: Sin red.");
+    server.send(400, "text/plain", "Sin conexión de red para actualizar Frontend");
     return;
   }
 
@@ -5118,9 +5148,9 @@ void handleUpdateFrontend() {
 }
 
 void handleUpdateGeneral() {
-  if (WiFi.status() != WL_CONNECTED) {
+  if (!networkConnected()) {
     server.sendHeader("Cache-Control", "no-store");
-    server.send(400, "text/plain", "No hay WiFi para actualización general");
+    server.send(400, "text/plain", "Sin conexión de red para actualización general");
     return;
   }
 
@@ -7929,6 +7959,58 @@ void setAllRelays(bool turnOn) {
 }
 
 
+// ══════════════════════════════════════════════════════════════════
+// ETHERNET W5500 (SPI) — Waveshare ESP32-S3-ETH-8DI-8RO
+// ══════════════════════════════════════════════════════════════════
+// El chip W5500 está cableado al SPI del ESP32-S3 en los pines definidos
+// en config.h (ETH_SPI_SCK/MISO/MOSI, ETH_PHY_CS/IRQ/RST).
+// onEthEvent() captura los eventos del stack lwIP y actualiza g_ethConnected.
+// ETH tiene prioridad sobre WiFi: si el cable está conectado se usa MQTT
+// directamente (sin restricciones de puerto), independientemente de
+// modoWiFi y de si es red enterprise.
+static void onEthEvent(arduino_event_id_t event, arduino_event_info_t info) {
+  switch (event) {
+    case ARDUINO_EVENT_ETH_START:
+      Serial.println(F("[ETH] Iniciado — hostname: druidabot"));
+      ETH.setHostname("druidabot");
+      break;
+    case ARDUINO_EVENT_ETH_CONNECTED:
+      Serial.println(F("[ETH] Cable conectado"));
+      break;
+    case ARDUINO_EVENT_ETH_GOT_IP:
+      g_ethIP = ETH.localIP();
+      g_ethConnected = true;
+      Serial.printf("[ETH] IP: %s  %d Mbps  %s\n",
+                    g_ethIP.toString().c_str(),
+                    ETH.linkSpeed(),
+                    ETH.fullDuplex() ? "full-duplex" : "half-duplex");
+      break;
+    case ARDUINO_EVENT_ETH_LOST_IP:
+      Serial.println(F("[ETH] IP perdida"));
+      g_ethConnected = false;
+      break;
+    case ARDUINO_EVENT_ETH_DISCONNECTED:
+      Serial.println(F("[ETH] Cable desconectado"));
+      g_ethConnected = false;
+      break;
+    case ARDUINO_EVENT_ETH_STOP:
+      Serial.println(F("[ETH] Detenido"));
+      g_ethConnected = false;
+      break;
+    default: break;
+  }
+}
+
+// Inicializa el bus SPI y el chip W5500. Debe llamarse UNA sola vez en setup(),
+// después de registrar los eventos WiFi pero ANTES del boot-grace delay,
+// así el W5500 ya negocia el link durante ese tiempo de espera.
+static void ethInit() {
+  Serial.println(F("[ETH] Inicializando W5500 vía SPI..."));
+  Network.onEvent(onEthEvent);
+  SPI.begin(ETH_SPI_SCK, ETH_SPI_MISO, ETH_SPI_MOSI);
+  ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_CS, ETH_PHY_IRQ, ETH_PHY_RST, SPI);
+}
+
 void registerWiFiEvents() {
   WiFi.onEvent([](WiFiEvent_t, WiFiEventInfo_t info) {
     Serial.print(F("✅ GOT IP: "));
@@ -8591,7 +8673,7 @@ void RTC_UpdateStatusAndHM() {
 // Devuelve true si sincronizó.
 // ============================
 bool SyncNTP_to_RTC() {
-  if (WiFi.status() != WL_CONNECTED) return false;
+  if (!networkConnected()) return false;
 
   bool horaSincronizada = false;
 
@@ -9360,8 +9442,8 @@ void mostrarOLED_OTA(const String& linea1,
 // ── Main endpoint ──
 
 void doOTAUpdateFirmware() {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[OTA FW] ERROR: No hay WiFi.");
+  if (!networkConnected()) {
+    Serial.println("[OTA FW] ERROR: Sin conexión de red.");
     mostrarOLED_OTA("OTA BACKEND", "ERROR:", "Sin WiFi");
     delay(2000);
     return;
@@ -9433,9 +9515,9 @@ void doOTAUpdateFirmware() {
 
 
 void doOTAUpdateFFat() {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[OTA FFat] ERROR: No hay WiFi.");
-    mostrarOLED_OTA("OTA FRONTEND", "ERROR:", "Sin WiFi");
+  if (!networkConnected()) {
+    Serial.println("[OTA FFat] ERROR: Sin red.");
+    mostrarOLED_OTA("OTA FRONTEND", "ERROR:", "Sin red");
     delay(2000);
     return;
   }
@@ -9513,9 +9595,9 @@ void doOTAUpdateFFat() {
 }
 
 bool doOTAUpdateFFatNoRestart() {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[OTA FFat] ERROR: No hay WiFi.");
-    mostrarOLED_OTA("OTA GENERAL", "ERROR:", "Sin WiFi");
+  if (!networkConnected()) {
+    Serial.println("[OTA FFat] ERROR: Sin red.");
+    mostrarOLED_OTA("OTA GENERAL", "ERROR:", "Sin red");
     delay(2000);
     return false;
   }
