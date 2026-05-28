@@ -697,6 +697,22 @@ static String buildStateJson() {
   }
   j += "}";
 
+  // SD Card — estado de la tarjeta y cola offline
+  j += ",\"sd\":{";
+  j += "\"available\":"; j += g_sdAvailable ? "true" : "false";
+  if (g_sdAvailable) {
+    uint64_t total = SD_MMC.totalBytes();
+    uint64_t free_ = total - SD_MMC.usedBytes();
+    j += ",\"totalMB\":";  j += String((uint32_t)(total >> 20));
+    j += ",\"freeMB\":";   j += String((uint32_t)(free_  >> 20));
+    j += ",\"queuePending\":"; j += SD_MMC.exists("/druida/queue.csv") ? "true" : "false";
+  }
+  if (g_sdReplaying) {
+    j += ",\"replaying\":true";
+    j += ",\"replaySent\":"; j += String(g_sdReplaySent);
+  }
+  j += "}";
+
   // RTC actual — contrato compartido con la webApp local
   datetime_t rtcNow;
   PCF85063_Read_Time(&rtcNow);
@@ -2081,6 +2097,11 @@ void setup() {
   // quedará en true y se saltará el bloque WiFi debajo.
   ethInit();
 
+  // ─── SD Card ─────────────────────────────────────────────────
+  // Se inicializa después de ETH (usan periféricos independientes).
+  // Si no hay tarjeta, g_sdAvailable queda false y el sistema sigue normal.
+  sdInit();
+
   // --- Pequeña espera post-boot para que el router levante tras un corte ---
   const uint32_t BOOT_GRACE_MS = 10000UL;
   uint32_t tStart = millis();
@@ -2360,16 +2381,41 @@ void loop() {
     cannalyticsLoop(nowMs, g_displayTemp, g_displayHum, DPV / 10.0f);
   }
 
-  // ─── Push de lecturas a Supabase cada 15 min ───────────────
-  // Funciona independientemente del browser (anda 24/7) y de si la
-  // red bloquea MQTT (siempre usa HTTPS directo). Llena los gaps que
-  // dejaba el sync client-side cuando nadie tenía la pestaña abierta.
-  if (networkConnected()) {
+  // ─── Push / log de lecturas cada 15 min ──────────────────────
+  // Con red   → push a Supabase (HTTPS, sin gaps en el dashboard)
+  //             + escritura en el log permanente diario de la SD.
+  // Sin red   → solo guarda en /druida/queue.csv para reenviar al
+  //             recuperar la conexión (también escribe en el log).
+  {
     static uint32_t g_lastReadingsPush = 0;
     const  uint32_t READINGS_PUSH_INTERVAL_MS = 15UL * 60UL * 1000UL;  // 15 min
     if (timeReached(nowMs, g_lastReadingsPush, READINGS_PUSH_INTERVAL_MS)) {
       g_lastReadingsPush = nowMs;
-      pushReadingsSupabase();
+      if (networkConnected()) {
+        pushReadingsSupabase();
+        if (g_sdAvailable) sdWriteLog(sdBuildCsvLine(sdTimestamp()));
+      } else if (g_sdAvailable) {
+        sdEnqueueReading();   // log permanente + cola offline
+      }
+    }
+  }
+
+  // ─── Replay de cola offline al recuperar conexión ─────────────
+  // Detecta flanco ascendente en networkConnected() y abre el replay.
+  // sdReplayStep() envía UNA entrada cada 3 s para no bloquear el loop.
+  {
+    static bool g_prevNetSD = false;
+    bool curNet = networkConnected();
+    if (curNet && !g_prevNetSD && g_sdAvailable && !g_sdReplaying) {
+      sdStartReplay();
+    }
+    g_prevNetSD = curNet;
+  }
+  if (g_sdReplaying) {
+    static uint32_t g_lastReplayStep = 0;
+    if (timeReached(nowMs, g_lastReplayStep, 3000UL)) {
+      g_lastReplayStep = nowMs;
+      sdReplayStep();
     }
   }
 
@@ -8009,6 +8055,208 @@ static void ethInit() {
   Network.onEvent(onEthEvent);
   SPI.begin(ETH_SPI_SCK, ETH_SPI_MISO, ETH_SPI_MOSI);
   ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_CS, ETH_PHY_IRQ, ETH_PHY_RST, SPI);
+}
+
+// ══════════════════════════════════════════════════════════════════
+// SD CARD — LOG LOCAL + COLA OFFLINE (SD_MMC 1-bit)
+// Waveshare ESP32-S3-ETH-8DI-8RO: CLK=48, CMD=47, D0=45
+// ══════════════════════════════════════════════════════════════════
+// Estrategia:
+//   • Cada 15 min con red   → pushReadingsSupabase() + log permanente en SD
+//   • Cada 15 min sin red   → sdEnqueueReading(): guarda en /druida/queue.csv
+//                             (también escribe en /druida/log_YYYYMMDD.csv)
+//   • Al recuperar red      → sdStartReplay() + sdReplayStep() (una entrada
+//                             cada 3 s, no bloquea el loop entre entradas).
+//     Si el replay es completo → queue.csv se elimina.
+//     Si hay error parcial  → queue.csv se mantiene (reintento en próx. reconexión).
+//   • El backend debe hacer UPSERT por (device_id, ts) para tolerar duplicados.
+// ══════════════════════════════════════════════════════════════════
+
+// Inicializa SD_MMC en modo 1-bit. Sin tarjeta → g_sdAvailable = false (silencioso).
+static void sdInit() {
+  Serial.println(F("[SD] Inicializando SD_MMC (1-bit)..."));
+  if (!SD_MMC.setPins(SD_CLK_PIN, SD_CMD_PIN, SD_D0_PIN, -1, -1, -1)) {
+    Serial.println(F("[SD] Error al configurar pines"));
+    return;
+  }
+  // mode1bit=true, format_if_failed=false (nunca formatear automáticamente)
+  if (!SD_MMC.begin("/sdcard", true, false)) {
+    Serial.println(F("[SD] No se pudo montar (sin tarjeta o error de hardware)"));
+    return;
+  }
+  uint8_t cardType = SD_MMC.cardType();
+  if (cardType == CARD_NONE) {
+    Serial.println(F("[SD] Sin tarjeta insertada"));
+    SD_MMC.end();
+    return;
+  }
+  g_sdAvailable = true;
+  uint64_t total = SD_MMC.totalBytes();
+  uint64_t used  = SD_MMC.usedBytes();
+  Serial.printf("[SD] OK  tipo=%d  %llu MB total  %llu MB libres\n",
+                cardType, total >> 20, (total - used) >> 20);
+  if (!SD_MMC.exists("/druida")) SD_MMC.mkdir("/druida");
+}
+
+// Devuelve timestamp ISO-8601 desde el PCF85063 ("YYYY-MM-DDTHH:MM:SS")
+static String sdTimestamp() {
+  datetime_t t = {};
+  PCF85063_Read_Time(&t);
+  char buf[20];
+  snprintf(buf, sizeof(buf), "%04u-%02u-%02uT%02u:%02u:%02u",
+           (unsigned)t.year, (unsigned)t.month, (unsigned)t.day,
+           (unsigned)t.hour, (unsigned)t.minute, (unsigned)t.second);
+  return String(buf);
+}
+
+// Formatea float para CSV — "nan" si no es finito
+static String sdFmt(float v) {
+  return isfinite(v) ? String(v, 2) : String("nan");
+}
+
+// Construye una línea CSV con los valores actuales de sensores
+// Formato: ts,temp,hum,dpv,soil_hum,soil_temp,soil_ec,ppfd
+static String sdBuildCsvLine(const String& ts) {
+  String line = ts;
+  line += ","; line += sdFmt(g_displayTemp);
+  line += ","; line += sdFmt(g_displayHum);
+  line += ","; line += sdFmt(DPV);
+  line += ","; line += sdFmt(soilHum);
+  line += ","; line += sdFmt(soilTemp);
+  line += ","; line += sdFmt(soilEC);
+  line += ","; line += (ppfdActivo && isfinite(g_ppfd)) ? sdFmt(g_ppfd) : String("nan");
+  return line;
+}
+
+// Escribe una línea en el log permanente del día (/druida/log_YYYYMMDD.csv)
+static void sdWriteLog(const String& csvLine) {
+  if (!g_sdAvailable) return;
+  datetime_t t = {};
+  PCF85063_Read_Time(&t);
+  char fname[36];
+  snprintf(fname, sizeof(fname), "/druida/log_%04u%02u%02u.csv",
+           (unsigned)t.year, (unsigned)t.month, (unsigned)t.day);
+  File f = SD_MMC.open(fname, FILE_APPEND);
+  if (!f) { Serial.printf("[SD] No se pudo abrir %s\n", fname); return; }
+  f.println(csvLine);
+  f.close();
+}
+
+// Encola la lectura en la cola offline (/druida/queue.csv)
+// También escribe en el log permanente del día.
+static void sdEnqueueReading() {
+  if (!g_sdAvailable) return;
+  String ts   = sdTimestamp();
+  String line = sdBuildCsvLine(ts);
+  sdWriteLog(line);                          // log permanente
+  File f = SD_MMC.open("/druida/queue.csv", FILE_APPEND);
+  if (!f) { Serial.println(F("[SD] No se pudo abrir queue.csv")); return; }
+  f.println(line);
+  f.close();
+  Serial.printf("[SD] Offline encolado: %s\n", ts.c_str());
+}
+
+// Envía UN entry histórico a /api/device/readings con el campo "ts"
+// (el backend usa "ts" para insertar con el timestamp correcto en lugar de NOW())
+static bool sdPostEntry(const char* ts, float temp, float hum, float dpv,
+                        float sH, float sT, float sEC, float ppfd) {
+  if (!networkConnected() || g_deviceId.length() == 0) return false;
+  WiFiClientSecure cl;
+  cl.setInsecure();
+  HTTPClient http;
+  if (!http.begin(cl, "https://app.datadruida.com.ar/api/device/readings")) return false;
+  http.addHeader("Content-Type", "application/json");
+  http.setTimeout(8000);
+
+  String body = "{\"device_id\":\"" + g_deviceId + "\"";
+  body += ",\"ts\":\""; body += ts; body += "\"";
+  auto appendF = [&](const char* key, float v) {
+    body += ",\""; body += key; body += "\":";
+    body += isfinite(v) ? String(v, 2) : String("null");
+  };
+  appendF("temp",      temp);
+  appendF("hum",       hum);
+  appendF("dpv",       dpv);
+  appendF("soil_hum",  sH);
+  appendF("soil_temp", sT);
+  appendF("soil_ec",   sEC);
+  appendF("ppfd",      ppfd);
+  body += "}";
+
+  int code = http.POST(body);
+  http.end();
+  return (code == 200 || code == 201);
+}
+
+// ── Archivo del replay (persiste entre llamadas a sdReplayStep) ──
+static File g_sdReplayFile;
+
+// Abre queue.csv y prepara el replay. Llamar cuando se detecta reconexión.
+static void sdStartReplay() {
+  if (!g_sdAvailable || g_sdReplaying) return;
+  if (!SD_MMC.exists("/druida/queue.csv")) return;
+  g_sdReplayFile = SD_MMC.open("/druida/queue.csv", FILE_READ);
+  if (!g_sdReplayFile) return;
+  if (g_sdReplayFile.size() == 0) { g_sdReplayFile.close(); return; }
+  g_sdReplaying    = true;
+  g_sdReplayTotal  = 0;
+  g_sdReplaySent   = 0;
+  g_sdReplayError  = false;
+  Serial.println(F("[SD] ▶ Iniciando replay de cola offline..."));
+}
+
+// Procesa UNA entrada del replay por llamada (throttled en loop a 3 s).
+// Una entrada = un HTTP POST + avance del puntero del archivo.
+// Si el POST falla → pausa el replay (se reintenta en la próxima reconexión).
+static void sdReplayStep() {
+  if (!g_sdReplaying) return;
+  if (!networkConnected()) {
+    g_sdReplayFile.close();
+    g_sdReplaying = false;
+    Serial.println(F("[SD] Replay pausado (sin red)"));
+    return;
+  }
+  while (g_sdReplayFile.available()) {
+    String line = g_sdReplayFile.readStringUntil('\n');
+    line.trim();
+    if (line.length() == 0) continue;   // línea vacía → siguiente
+    g_sdReplayTotal++;
+    // Parsear CSV: ts,temp,hum,dpv,soil_hum,soil_temp,soil_ec,ppfd
+    int cp[7] = {-1,-1,-1,-1,-1,-1,-1};
+    int cnt = 0;
+    for (int i = 0; i < (int)line.length() && cnt < 7; i++) {
+      if (line[i] == ',') cp[cnt++] = i;
+    }
+    if (cnt < 7) continue;   // línea malformada → saltar
+    char tsBuf[20] = {};
+    line.substring(0, cp[0]).toCharArray(tsBuf, sizeof(tsBuf));
+    float v[7] = {};
+    for (int i = 0; i < 7; i++) {
+      int from = cp[i] + 1;
+      int to   = (i < 6) ? cp[i+1] : (int)line.length();
+      String s = line.substring(from, to);
+      v[i] = (s == "nan") ? NAN : s.toFloat();
+    }
+    if (sdPostEntry(tsBuf, v[0],v[1],v[2],v[3],v[4],v[5],v[6])) {
+      g_sdReplaySent++;
+      Serial.printf("[SD] Replay %d: %s ✓\n", g_sdReplaySent, tsBuf);
+    } else {
+      g_sdReplayError = true;
+      g_sdReplayFile.close();
+      g_sdReplaying = false;
+      Serial.printf("[SD] Replay parado en entrada %d (error de red) — se reintentará\n",
+                    g_sdReplayTotal);
+    }
+    return;   // UNA entrada por llamada
+  }
+  // Fin de archivo
+  g_sdReplayFile.close();
+  g_sdReplaying = false;
+  Serial.printf("[SD] ■ Replay completo: %d/%d enviados\n", g_sdReplaySent, g_sdReplayTotal);
+  if (!g_sdReplayError && g_sdReplaySent > 0) {
+    SD_MMC.remove("/druida/queue.csv");
+    Serial.println(F("[SD] queue.csv eliminado"));
+  }
 }
 
 void registerWiFiEvents() {

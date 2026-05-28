@@ -13,6 +13,7 @@
 #include <WiFiUdp.h>
 #include <ETH.h>
 #include <SPI.h>
+#include <SD_MMC.h>
 #include <NTPClient.h>
 #include <UniversalTelegramBot.h>
 #include <EEPROM.h>
@@ -715,6 +716,20 @@ static int     bcdToDec(uint8_t val) { return (int)((val / 16 * 10) + (val % 16)
 #define ETH_SPI_SCK   15
 #define ETH_SPI_MISO  14
 #define ETH_SPI_MOSI  13
+
+// ===== SD Card (SD_MMC — 1-bit) — Waveshare ESP32-S3-ETH-8DI-8RO =====
+// Slot SD conectado al periférico SDMMC del ESP32-S3.
+// Fuente: demo oficial Waveshare (WS_SD.h).
+#define SD_CLK_PIN  48   // SDMMC_CLK
+#define SD_CMD_PIN  47   // SDMMC_CMD
+#define SD_D0_PIN   45   // SDMMC_D0  (modo 1-bit)
+
+// ── Estado de la SD ──────────────────────────────────────────────
+static bool g_sdAvailable  = false;   // true si tarjeta montada y lista
+static bool g_sdReplaying  = false;   // true mientras se reenvía la cola offline
+static int  g_sdReplayTotal = 0;      // entradas leídas del queue en el replay actual
+static int  g_sdReplaySent  = 0;      // entradas enviadas con éxito
+static bool g_sdReplayError = false;  // hubo al menos un fallo de red en el replay
 
 // ===== RS485 / Modbus RTU en Waveshare ESP32-S3-ETH-8DI-8RO =====
 static const int RS485_TX = 17;
