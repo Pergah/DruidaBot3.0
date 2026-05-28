@@ -713,6 +713,16 @@ static String buildStateJson() {
   }
   j += "}";
 
+  // Cola offline FFat (flash interno) — activa cuando no hay SD
+  j += ",\"ffat\":{";
+  j += "\"queueEntries\":"; j += String(g_ffatQueueCount);
+  j += ",\"queueMax\":";    j += String(FFAT_QUEUE_MAX_ENTRIES);
+  if (g_ffatReplaying) {
+    j += ",\"replaying\":true";
+    j += ",\"replaySent\":"; j += String(g_ffatReplaySent);
+  }
+  j += "}";
+
   // RTC actual — contrato compartido con la webApp local
   datetime_t rtcNow;
   PCF85063_Read_Time(&rtcNow);
@@ -2102,6 +2112,11 @@ void setup() {
   // Si no hay tarjeta, g_sdAvailable queda false y el sistema sigue normal.
   sdInit();
 
+  // ─── Cola offline FFat (fallback sin SD) ─────────────────────
+  // Cuenta las entradas ya guardadas en /ffq.csv desde el boot anterior.
+  // Si hay cola pendiente, se enviará a Supabase al recuperar internet.
+  ffatQueueInit();
+
   // --- Pequeña espera post-boot para que el router levante tras un corte ---
   const uint32_t BOOT_GRACE_MS = 10000UL;
   uint32_t tStart = millis();
@@ -2382,10 +2397,10 @@ void loop() {
   }
 
   // ─── Push / log de lecturas cada 15 min ──────────────────────
-  // Con red   → push a Supabase (HTTPS, sin gaps en el dashboard)
-  //             + escritura en el log permanente diario de la SD.
-  // Sin red   → solo guarda en /druida/queue.csv para reenviar al
-  //             recuperar la conexión (también escribe en el log).
+  // Con red        → push a Supabase + log permanente diario en SD (si hay).
+  // Sin red + SD   → sdEnqueueReading(): log + cola en tarjeta.
+  // Sin red + FFat → ffatEnqueueReading(): cola en flash interno
+  //                  (max 1 semana = 672 entradas; sin log, solo queue).
   {
     static uint32_t g_lastReadingsPush = 0;
     const  uint32_t READINGS_PUSH_INTERVAL_MS = 15UL * 60UL * 1000UL;  // 15 min
@@ -2395,27 +2410,42 @@ void loop() {
         pushReadingsSupabase();
         if (g_sdAvailable) sdWriteLog(sdBuildCsvLine(sdTimestamp()));
       } else if (g_sdAvailable) {
-        sdEnqueueReading();   // log permanente + cola offline
+        sdEnqueueReading();        // SD disponible: log permanente + cola offline
+      } else {
+        ffatEnqueueReading();      // Sin SD: cola en flash interno (hasta 1 semana)
       }
     }
   }
 
-  // ─── Replay de cola offline al recuperar conexión ─────────────
-  // Detecta flanco ascendente en networkConnected() y abre el replay.
-  // sdReplayStep() envía UNA entrada cada 3 s para no bloquear el loop.
+  // ─── Replay de colas offline al recuperar conexión ─────────────
+  // Detecta flanco ascendente de networkConnected().
+  // Prioridad: SD primero → luego FFat (no ejecuta ambos a la vez).
+  // Cada replay envía UNA entrada cada 3 s para no bloquear el loop.
   {
-    static bool g_prevNetSD = false;
+    static bool g_prevNetOffline = false;
     bool curNet = networkConnected();
-    if (curNet && !g_prevNetSD && g_sdAvailable && !g_sdReplaying) {
-      sdStartReplay();
+    if (curNet && !g_prevNetOffline) {
+      if (g_sdAvailable && !g_sdReplaying)
+        sdStartReplay();
+      if (!g_sdReplaying && g_ffatQueueCount > 0 && !g_ffatReplaying)
+        ffatStartReplay();
     }
-    g_prevNetSD = curNet;
+    g_prevNetOffline = curNet;
   }
+  // SD replay: una entrada cada 3 s
   if (g_sdReplaying) {
-    static uint32_t g_lastReplayStep = 0;
-    if (timeReached(nowMs, g_lastReplayStep, 3000UL)) {
-      g_lastReplayStep = nowMs;
+    static uint32_t g_lastSDReplayStep = 0;
+    if (timeReached(nowMs, g_lastSDReplayStep, 3000UL)) {
+      g_lastSDReplayStep = nowMs;
       sdReplayStep();
+    }
+  }
+  // FFat replay: una entrada cada 3 s (solo si el SD no está reproduciendo)
+  if (g_ffatReplaying && !g_sdReplaying) {
+    static uint32_t g_lastFFatStep = 0;
+    if (timeReached(nowMs, g_lastFFatStep, 3000UL)) {
+      g_lastFFatStep = nowMs;
+      ffatReplayStep();
     }
   }
 
@@ -8256,6 +8286,130 @@ static void sdReplayStep() {
   if (!g_sdReplayError && g_sdReplaySent > 0) {
     SD_MMC.remove("/druida/queue.csv");
     Serial.println(F("[SD] queue.csv eliminado"));
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// COLA OFFLINE EN FFAT — fallback cuando no hay tarjeta SD
+// ══════════════════════════════════════════════════════════════════
+// Cuando g_sdAvailable = false, las lecturas offline se guardan en
+// /ffq.csv dentro del flash interno (FFat), que ya está montado.
+// Capacidad: FFAT_QUEUE_MAX_ENTRIES = 672 entradas (1 semana a 15 min).
+// Cuando se recupera internet: ffatStartReplay() + ffatReplayStep()
+// envían las entradas a Supabase igual que sdReplayStep().
+// ══════════════════════════════════════════════════════════════════
+
+// Cuenta las entradas existentes en ffq.csv al boot.
+// Así g_ffatQueueCount refleja la cola real aunque el dispositivo haya reiniciado.
+static void ffatQueueInit() {
+  g_ffatQueueCount = 0;
+  if (!FFat.exists(FFAT_QUEUE_PATH)) return;
+  File f = FFat.open(FFAT_QUEUE_PATH, "r");
+  if (!f) return;
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.length() > 0) g_ffatQueueCount++;
+  }
+  f.close();
+  if (g_ffatQueueCount > 0) {
+    Serial.printf("[FFat] Cola offline: %u/%u entradas (%.0f%% de 1 semana)\n",
+                  g_ffatQueueCount, (unsigned)FFAT_QUEUE_MAX_ENTRIES,
+                  100.0f * g_ffatQueueCount / FFAT_QUEUE_MAX_ENTRIES);
+  }
+}
+
+// Guarda una lectura en la cola offline del FFat.
+// Reutiliza sdTimestamp() y sdBuildCsvLine() del bloque SD.
+// Si la cola llega a FFAT_QUEUE_MAX_ENTRIES (1 semana), descarta las nuevas
+// (se preservan los datos más antiguos para no perder el historial).
+static void ffatEnqueueReading() {
+  if (g_ffatQueueCount >= FFAT_QUEUE_MAX_ENTRIES) {
+    Serial.printf("[FFat] Cola llena (%u entradas = 1 semana) — lectura descartada\n",
+                  (unsigned)FFAT_QUEUE_MAX_ENTRIES);
+    return;
+  }
+  String ts   = sdTimestamp();
+  String line = sdBuildCsvLine(ts);
+  File f = FFat.open(FFAT_QUEUE_PATH, "a");
+  if (!f) { Serial.println(F("[FFat] Error al abrir ffq.csv para escribir")); return; }
+  f.println(line);
+  f.close();
+  g_ffatQueueCount++;
+  Serial.printf("[FFat] Offline encolado: %s  (%u/%u)\n",
+                ts.c_str(), g_ffatQueueCount, (unsigned)FFAT_QUEUE_MAX_ENTRIES);
+}
+
+// ── Replay state ──────────────────────────────────────────────────
+static File g_ffatReplayFile;
+
+// Abre ffq.csv y prepara el replay. Llamar al detectar reconexión.
+static void ffatStartReplay() {
+  if (g_ffatReplaying || g_ffatQueueCount == 0) return;
+  if (!FFat.exists(FFAT_QUEUE_PATH)) { g_ffatQueueCount = 0; return; }
+  g_ffatReplayFile = FFat.open(FFAT_QUEUE_PATH, "r");
+  if (!g_ffatReplayFile) return;
+  if (g_ffatReplayFile.size() == 0) { g_ffatReplayFile.close(); return; }
+  g_ffatReplaying   = true;
+  g_ffatReplaySent  = 0;
+  g_ffatReplayTotal = 0;
+  g_ffatReplayError = false;
+  Serial.printf("[FFat] ▶ Iniciando replay: %u entradas en flash interno...\n",
+                g_ffatQueueCount);
+}
+
+// Procesa UNA entrada por llamada (throttled en loop a 3 s).
+// Reutiliza sdPostEntry() del bloque SD para el POST a Supabase.
+static void ffatReplayStep() {
+  if (!g_ffatReplaying) return;
+  if (!networkConnected()) {
+    g_ffatReplayFile.close();
+    g_ffatReplaying = false;
+    Serial.println(F("[FFat] Replay pausado (sin red)"));
+    return;
+  }
+  while (g_ffatReplayFile.available()) {
+    String line = g_ffatReplayFile.readStringUntil('\n');
+    line.trim();
+    if (line.length() == 0) continue;
+    g_ffatReplayTotal++;
+    // Parsear CSV: ts,temp,hum,dpv,soil_hum,soil_temp,soil_ec,ppfd
+    int cp[7] = {-1,-1,-1,-1,-1,-1,-1};
+    int cnt = 0;
+    for (int i = 0; i < (int)line.length() && cnt < 7; i++) {
+      if (line[i] == ',') cp[cnt++] = i;
+    }
+    if (cnt < 7) continue;   // línea malformada → saltar
+    char tsBuf[20] = {};
+    line.substring(0, cp[0]).toCharArray(tsBuf, sizeof(tsBuf));
+    float v[7] = {};
+    for (int i = 0; i < 7; i++) {
+      int from = cp[i] + 1;
+      int to   = (i < 6) ? cp[i+1] : (int)line.length();
+      String s = line.substring(from, to);
+      v[i] = (s == "nan") ? NAN : s.toFloat();
+    }
+    if (sdPostEntry(tsBuf, v[0],v[1],v[2],v[3],v[4],v[5],v[6])) {
+      g_ffatReplaySent++;
+      Serial.printf("[FFat] Replay %d: %s ✓\n", g_ffatReplaySent, tsBuf);
+    } else {
+      g_ffatReplayError = true;
+      g_ffatReplayFile.close();
+      g_ffatReplaying = false;
+      Serial.printf("[FFat] Replay parado en entrada %d (error de red) — se reintentará\n",
+                    g_ffatReplayTotal);
+    }
+    return;   // UNA entrada por llamada
+  }
+  // Fin de archivo
+  g_ffatReplayFile.close();
+  g_ffatReplaying = false;
+  Serial.printf("[FFat] ■ Replay completo: %d/%d enviados\n",
+                g_ffatReplaySent, g_ffatReplayTotal);
+  if (!g_ffatReplayError && g_ffatReplaySent > 0) {
+    FFat.remove(FFAT_QUEUE_PATH);
+    g_ffatQueueCount = 0;
+    Serial.println(F("[FFat] ffq.csv eliminado"));
   }
 }
 

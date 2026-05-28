@@ -731,6 +731,19 @@ static int  g_sdReplayTotal = 0;      // entradas leídas del queue en el replay
 static int  g_sdReplaySent  = 0;      // entradas enviadas con éxito
 static bool g_sdReplayError = false;  // hubo al menos un fallo de red en el replay
 
+// ── Cola offline en FFat (flash interno) — fallback sin tarjeta SD ───────────
+// Usa /ffq.csv en la partición FFat (ya montada en setup()).
+// Capacidad: FFAT_QUEUE_MAX_ENTRIES lecturas = 1 semana a 15 min de intervalo.
+// La EEPROM no es viable (solo 1024 bytes, casi llenos). FFat tiene 1-3 MB libres.
+#define FFAT_QUEUE_PATH        "/ffq.csv"
+#define FFAT_QUEUE_MAX_ENTRIES 672       // 7 días × 96 lecturas/día
+
+static uint16_t g_ffatQueueCount = 0;   // entradas en ffq.csv (0 si vacío)
+static bool     g_ffatReplaying   = false;
+static int      g_ffatReplaySent  = 0;
+static int      g_ffatReplayTotal = 0;
+static bool     g_ffatReplayError = false;
+
 // ===== RS485 / Modbus RTU en Waveshare ESP32-S3-ETH-8DI-8RO =====
 static const int RS485_TX = 17;
 static const int RS485_RX = 18;
